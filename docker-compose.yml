@@ -1,0 +1,36 @@
+version: '3.8'
+#Este archivo le dice a Docker: "Levantame un servidor MinIO y dame una carpeta para guardar los datos".
+services:
+  # CAMBIO AQUÍ: De 'minio_local' a 'minio'
+  minio:
+    image: minio/minio:latest
+    container_name: minio # <--- SIN GUION BAJO
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./minio_data:/data
+    networks:
+      - medical_network
+
+  backend_ai:
+    build: .
+    container_name: fast_api_medical
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URI=${MONGO_URI}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+    depends_on:
+      - minio # <--- ASEGURATE QUE ESTO COINCIDA CON EL SERVICIO DE ARRIBA
+    networks:
+      - medical_network
+
+networks:
+  medical_network:
+    driver: bridge

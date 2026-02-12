@@ -1,0 +1,15 @@
+# Entornos virtuales de Python
+.venv/
+venv/
+__pycache__/
+
+# Variables de entorno y secretos
+.env
+
+# Datos de MinIO (Imágenes pesadas)
+minio_data/
+
+# Archivos del sistema
+.DS_Store
+
+*:Zone.Identifier

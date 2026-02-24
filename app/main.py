@@ -8,7 +8,8 @@ from typing import Optional, List
 from app.core.inference import load_models, run_inference
 from app.core.storage import upload_file
 from app.core.database import save_prediction_metadata
-
+from app.errors.handlers import register_exception_handlers
+from app.errors.http_errors import *
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -17,6 +18,7 @@ async def lifespan(app: FastAPI):
     print("Apagando servicio...")
 
 app = FastAPI(title="Medical AI API", lifespan=lifespan)
+register_exception_handlers(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,14 +45,12 @@ async def predict_endpoint(
     - Para Metástasis: Requiere T1, T1CE, T2 y FLAIR.
     """
     if task_type not in ["metastasis", "acv"]:
-        raise HTTPException(
-            status_code=400, detail="Task must be 'metastasis' or 'acv'")
+        raise ValidationError(detail="Task must be 'metastasis' or 'acv'")
 
     # --- VALIDACIÓN DE ARCHIVOS REQUERIDOS ---
     if task_type == "metastasis":
         if not (file_t1ce and file_t2 and file_flair):
-            raise HTTPException(
-                status_code=422,
+            raise UnprocessableEntityError(
                 detail="Para Metástasis se requieren 4 secuencias: T1, T1CE, T2 y FLAIR."
             )
         files_map = {
@@ -106,7 +106,7 @@ async def predict_endpoint(
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise InternalError(detail=str(e))
 
     finally:
         # Limpiar disco

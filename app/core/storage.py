@@ -1,6 +1,5 @@
 from minio import Minio
 from app.core.config import settings
-import os
 
 # Cliente MinIO
 client = Minio(

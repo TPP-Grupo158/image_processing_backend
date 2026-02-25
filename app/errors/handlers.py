@@ -1,6 +1,6 @@
 from fastapi.responses import JSONResponse
 from fastapi import Request
-from http_errors import APIError
+from app.errors.http_errors import APIError
 
 
 def register_exception_handlers(app):

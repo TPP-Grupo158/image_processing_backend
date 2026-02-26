@@ -7,7 +7,7 @@ __pycache__/
 .env
 
 # Modelo Alzheimer (muy pesado)
-.pt
+*.pt
 
 # Datos de MinIO (Imágenes pesadas)
 minio_data/

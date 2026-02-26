@@ -1,5 +1,6 @@
 from pydantic import BaseModel, HttpUrl
 from typing import List
+from enum import Enum
 
 # Error response schema send to the user in case of an error
 class APIErrorSchema(BaseModel):
@@ -15,3 +16,9 @@ class PredictionResponse(BaseModel):
     prediction_image: HttpUrl
     task: str
     modalities_used: List[str]
+
+
+class TaskType(str, Enum):
+    metastasis = "metastasis"
+    acv = "acv"
+    alzheimer = "alzheimer"

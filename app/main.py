@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import shutil
@@ -9,8 +9,8 @@ from app.core.inference import load_models, run_inference
 from app.core.storage import upload_file
 from app.core.database import save_prediction_metadata
 from app.errors.handlers import register_exception_handlers
-from app.errors.http_errors import *
-from app.schemas import PredictionResponse, APIErrorSchema
+from app.errors.http_errors import InternalError, UnprocessableEntityError
+from app.schemas import PredictionResponse, APIErrorSchema, TaskType
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -40,7 +40,7 @@ app.add_middleware(
     },
 )
 async def predict_endpoint(
-    task_type: str,
+    task_type: TaskType,
     doctor_id: str = Form(...),
     # Definimos los 4 tipos de secuencias posibles
     file_t1: UploadFile = File(...),         # T1 es base para ambos
@@ -54,11 +54,11 @@ async def predict_endpoint(
     - Para ACV: Solo requiere file_t1.
     - Para Metástasis: Requiere T1, T1CE, T2 y FLAIR.
     """
-    if task_type not in ["metastasis", "acv"]:
-        raise ValidationError(detail="Task must be 'metastasis' or 'acv'")
+    #if task_type not in ["metastasis", "acv"]:
+    #    raise ValidationError(detail="Task must be 'metastasis' or 'acv'")
 
     # --- VALIDACIÓN DE ARCHIVOS REQUERIDOS ---
-    if task_type == "metastasis":
+    if task_type == TaskType.metastasis:
         if not (file_t1ce and file_t2 and file_flair):
             raise UnprocessableEntityError(
                 detail="Para Metástasis se requieren 4 secuencias: T1, T1CE, T2 y FLAIR."
@@ -66,7 +66,7 @@ async def predict_endpoint(
         files_map = {
             "t1": file_t1, "t1ce": file_t1ce, "t2": file_t2, "flair": file_flair
         }
-    else:
+    elif task_type == TaskType.acv:
         # Para ACV solo usamos T1
         files_map = {"t1": file_t1}
 

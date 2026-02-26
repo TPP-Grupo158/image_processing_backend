@@ -10,6 +10,7 @@ from app.core.storage import upload_file
 from app.core.database import save_prediction_metadata
 from app.errors.handlers import register_exception_handlers
 from app.errors.http_errors import *
+from app.schemas import PredictionResponse, APIErrorSchema
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -28,7 +29,16 @@ app.add_middleware(
 )
 
 
-@app.post("/predict/{task_type}")
+@app.post(
+    "/predict/{task_type}",
+    response_model=PredictionResponse,
+    responses={
+        400: {"model": APIErrorSchema},
+        404: {"model": APIErrorSchema},
+        422: {"model": APIErrorSchema},
+        500: {"model": APIErrorSchema},
+    },
+)
 async def predict_endpoint(
     task_type: str,
     doctor_id: str = Form(...),
@@ -94,14 +104,14 @@ async def predict_endpoint(
         # 5. Guardamos Metadata
         db_id = save_prediction_metadata(doctor_id, task_type, url_in, url_out)
 
-        return {
-            "status": "success",
-            "db_id": db_id,
-            "original_image": url_in,
-            "prediction_image": url_out,
-            "task": task_type,
-            "modalities_used": list(saved_paths.keys())
-        }
+        return PredictionResponse(
+            status="success",
+            db_id=db_id,
+            original_image=url_in,
+            prediction_image=url_out,
+            task=task_type,
+            modalities_used=list(saved_paths.keys())
+        )
 
     except Exception as e:
         import traceback

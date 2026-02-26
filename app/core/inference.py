@@ -4,10 +4,13 @@ import nibabel as nib
 import numpy as np
 from monai.inferers import sliding_window_inference
 from app.models.architecture import UNet3D
+from monai.networks.nets import DenseNet121
+from app.schemas import TaskType
 
 # Rutas de modelos (en app/models/)
 MODEL_PATH_METS = "app/models/best_model_mets.pth"
 MODEL_PATH_ACV = "app/models/best_model_acv.pth"
+MODEL_PATH_ALZHEIMER = "app/models/best_model_alzheimer.pt"
 
 # Dispositivo (GPU si hay, sino CPU)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -15,14 +18,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Variables globales para mantener los modelos en memoria
 model_mets = None
 model_acv = None
-
+model_alzheimer = None
 
 def load_models():
     """
     Carga los modelos en memoria al iniciar la API.
     Se llama desde el evento 'lifespan' en main.py.
     """
-    global model_mets, model_acv
+    global model_mets, model_acv, model_alzheimer
     print(f"Usando dispositivo: {device}")
 
     # --- 1. Cargar Modelo METÁSTASIS (4 Canales) ---
@@ -61,6 +64,21 @@ def load_models():
     except Exception as e:
         print(f"❌ Error cargando Modelo ACV: {e}")
 
+    # ---3. Cargar Modelo Alzheimer (1 Canal - T1)---
+    try:
+        model_alzheimer = DenseNet121(spatial_dims=3, in_channels=1, out_channels=2).to(device)
+        if os.path.exists(MODEL_PATH_ALZHEIMER):
+            checkpoint = torch.load(MODEL_PATH_ALZHEIMER, map_location=device, weights_only=False)
+            model_alzheimer.load_state_dict(checkpoint['model_state'])
+            model_alzheimer.eval()
+            print("✅ Modelo Alzheimer cargado correctamente.")
+        else:
+            print(
+                f"⚠️ Alerta: No se encontró {MODEL_PATH_ALZHEIMER}. La inferencia de Alzheimer fallará.")
+    
+    except Exception as e:
+        print(f"❌ Error cargando Modelo Alzheimer: {e}")
+
 
 def robust_normalization(img_data):
     """
@@ -94,7 +112,7 @@ def z_score_normalization(img_data):
     return (img_data - mean) / (std + 1e-8)
 
 
-def preprocess_multichannel(paths_dict, task_type):
+def preprocess_multichannel(paths_dict, task_type: TaskType):
     """
     Maneja la carga y fusión de múltiples canales.
     """
@@ -103,7 +121,7 @@ def preprocess_multichannel(paths_dict, task_type):
     affine = img_t1.affine
     header = img_t1.header
 
-    if task_type == "acv":
+    if task_type == TaskType.acv:
         # Caso Simple: Solo 1 canal
         data = img_t1.get_fdata()  # (H, W, D)
         data = robust_normalization(data)
@@ -148,21 +166,21 @@ def preprocess_multichannel(paths_dict, task_type):
     return tensor, affine, header
 
 
-def run_inference(saved_paths_dict, output_path, task_type):
+def run_inference(saved_paths_dict, output_path, task_type: TaskType):
     """
     Recibe un diccionario de rutas {"t1": path, "t2": path...}
     """
-    model = model_mets if task_type == "metastasis" else model_acv
+    model = model_mets if task_type == TaskType.metastasis else model_acv
 
     if model is None:
-        raise ValueError(f"Modelo para {task_type} no cargado.")
+        raise ValueError(f"Modelo para {task_type.value} no cargado.")
 
     # Llamamos al nuevo preprocesador multicanal
     tensor_img, affine, header = preprocess_multichannel(
         saved_paths_dict, task_type)
     tensor_img = tensor_img.to(device)
 
-    print(f"Inferencia {task_type}. Tensor shape: {tensor_img.shape}")
+    print(f"Inferencia {task_type.value}. Tensor shape: {tensor_img.shape}")
 
     with torch.no_grad():
         output = sliding_window_inference(

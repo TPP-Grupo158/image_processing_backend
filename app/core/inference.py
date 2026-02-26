@@ -4,7 +4,6 @@ import nibabel as nib
 import numpy as np
 from monai.inferers import sliding_window_inference
 from app.models.architecture import UNet3D
-from app.core.config import settings
 
 # Rutas de modelos (en app/models/)
 MODEL_PATH_METS = "app/models/best_model_mets.pth"

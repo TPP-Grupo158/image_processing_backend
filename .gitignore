@@ -13,3 +13,6 @@ minio_data/
 .DS_Store
 
 *:Zone.Identifier
+
+# Linter
+.ruff_cache/

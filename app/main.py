@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import shutil
 import os
 import uuid
-from typing import Optional, List
+from typing import Optional
 from app.core.inference import load_models, run_inference
 from app.core.storage import upload_file
 from app.core.database import save_prediction_metadata

@@ -8,13 +8,24 @@ class APIErrorSchema(BaseModel):
     status: int
     detail: str
 
-# Prediction response schema
+# Prediction response schema for segmentation tasks (ACV, Metastasis)
 class PredictionResponse(BaseModel):
     status: str
     db_id: str
     original_image: HttpUrl
     prediction_image: HttpUrl
     task: str
+    modalities_used: List[str]
+
+# Classification response schema for Alzheimer
+class AlzheimerPredictionResponse(BaseModel):
+    status: str
+    db_id: str
+    original_image: HttpUrl
+    task: str
+    prediction: int  # 0 or 1
+    probability: float  # Probability of positive class
+    threshold: float  # Threshold used for classification
     modalities_used: List[str]
 
 

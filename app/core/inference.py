@@ -1,13 +1,21 @@
 import os
 import torch
+import torch.nn.functional as F
 import nibabel as nib
 import numpy as np
 from monai.inferers import sliding_window_inference
+from monai.transforms import (
+    Compose, LoadImaged, EnsureChannelFirstd, Spacingd, Resized,
+    ScaleIntensityd, ToTensord
+)
 from app.models.architecture import UNet3D
+from monai.networks.nets import DenseNet121
+from app.schemas import TaskType
 
 # Rutas de modelos (en app/models/)
 MODEL_PATH_METS = "app/models/best_model_mets.pth"
 MODEL_PATH_ACV = "app/models/best_model_acv.pth"
+MODEL_PATH_ALZHEIMER = "app/models/best_model_alzheimer.pt"
 
 # Dispositivo (GPU si hay, sino CPU)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -15,14 +23,15 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Variables globales para mantener los modelos en memoria
 model_mets = None
 model_acv = None
-
+model_alzheimer = None
+threshold = None  # Threshold por defecto para Alzheimer
 
 def load_models():
     """
     Carga los modelos en memoria al iniciar la API.
     Se llama desde el evento 'lifespan' en main.py.
     """
-    global model_mets, model_acv
+    global model_mets, model_acv, model_alzheimer, threshold
     print(f"Usando dispositivo: {device}")
 
     # --- 1. Cargar Modelo METÁSTASIS (4 Canales) ---
@@ -61,6 +70,22 @@ def load_models():
     except Exception as e:
         print(f"❌ Error cargando Modelo ACV: {e}")
 
+    # ---3. Cargar Modelo Alzheimer (1 Canal - T1)---
+    try:
+        model_alzheimer = DenseNet121(spatial_dims=3, in_channels=1, out_channels=2).to(device)
+        if os.path.exists(MODEL_PATH_ALZHEIMER):
+            checkpoint = torch.load(MODEL_PATH_ALZHEIMER, map_location=device, weights_only=False)
+            model_alzheimer.load_state_dict(checkpoint['model_state'])
+            threshold = checkpoint["threshold"]
+            model_alzheimer.eval()
+            print("✅ Modelo Alzheimer cargado correctamente.")
+        else:
+            print(
+                f"⚠️ Alerta: No se encontró {MODEL_PATH_ALZHEIMER}. La inferencia de Alzheimer fallará.")
+    
+    except Exception as e:
+        print(f"❌ Error cargando Modelo Alzheimer: {e}")
+
 
 def robust_normalization(img_data):
     """
@@ -94,7 +119,33 @@ def z_score_normalization(img_data):
     return (img_data - mean) / (std + 1e-8)
 
 
-def preprocess_multichannel(paths_dict, task_type):
+def preprocess_alzheimer(image_path):
+    """
+    Preprocesamiento específico para Alzheimer usando transformaciones MONAI.
+    Retorna tensor listo para el modelo.
+    """
+    # Transformaciones idénticas al pipeline de Kaggle
+    transforms = Compose([
+        LoadImaged(keys=["image"]),
+        EnsureChannelFirstd(keys=["image"]),
+        Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0)),
+        Resized(keys=["image"], spatial_size=(176, 256, 256)),
+        ScaleIntensityd(keys=["image"]),
+        ToTensord(keys=["image"]),
+    ])
+    
+    # Aplicar transformaciones
+    data = transforms({"image": image_path})
+    tensor_img = data["image"]
+    
+    # Asegurar batch dim: (C, H, W, D) -> (B, C, H, W, D)
+    if tensor_img.dim() == 4:
+        tensor_img = tensor_img.unsqueeze(0)
+    
+    return tensor_img
+
+
+def preprocess_multichannel(paths_dict, task_type: TaskType):
     """
     Maneja la carga y fusión de múltiples canales.
     """
@@ -103,7 +154,7 @@ def preprocess_multichannel(paths_dict, task_type):
     affine = img_t1.affine
     header = img_t1.header
 
-    if task_type == "acv":
+    if task_type == TaskType.acv:
         # Caso Simple: Solo 1 canal
         data = img_t1.get_fdata()  # (H, W, D)
         data = robust_normalization(data)
@@ -148,21 +199,65 @@ def preprocess_multichannel(paths_dict, task_type):
     return tensor, affine, header
 
 
-def run_inference(saved_paths_dict, output_path, task_type):
+def run_inference_alzheimer(saved_paths_dict):
+    """
+    Ejecuta inferencia para Alzheimer (clasificación binaria).
+    Aplica transformaciones MONAI específicas del modelo.
+    Retorna: {"prediction": 0 o 1, "probability": probabilidad del caso positivo}
+    """
+    global model_alzheimer, threshold
+    
+    if model_alzheimer is None:
+        raise ValueError("Modelo Alzheimer no cargado.")
+    
+    # Obtener ruta de la imagen T1
+    image_path = saved_paths_dict["t1"]
+    
+    # Preprocesar con transformaciones MONAI
+    tensor_img = preprocess_alzheimer(image_path)
+    tensor_img = tensor_img.to(device)
+    
+    print(f"Inferencia Alzheimer. Tensor shape: {tensor_img.shape}")
+    
+    with torch.no_grad():
+        output = model_alzheimer(tensor_img)
+        # output shape: (batch, num_classes=2)
+        probs = F.softmax(output, dim=1)[:, 1]  # Probabilidad de clase 1
+        prob_value = probs.cpu().numpy()[0]
+        
+        # Usar threshold guardado durante training
+        prediction = int(prob_value >= threshold)
+    
+    return {
+        "prediction": prediction,
+        "probability": float(prob_value),
+        "threshold": float(threshold)
+    }
+
+
+def run_inference(saved_paths_dict, output_path, task_type: TaskType):
     """
     Recibe un diccionario de rutas {"t1": path, "t2": path...}
+    
+    Retorna:
+    - Para ACV y Metástasis: ruta del archivo segmentado
+    - Para Alzheimer: diccionario con clasificación {"prediction": 0 o 1, "probability": float}
     """
-    model = model_mets if task_type == "metastasis" else model_acv
+    
+    if task_type == TaskType.alzheimer:
+        return run_inference_alzheimer(saved_paths_dict)
+    
+    model = model_mets if task_type == TaskType.metastasis else model_acv
 
     if model is None:
-        raise ValueError(f"Modelo para {task_type} no cargado.")
+        raise ValueError(f"Modelo para {task_type.value} no cargado.")
 
     # Llamamos al nuevo preprocesador multicanal
     tensor_img, affine, header = preprocess_multichannel(
         saved_paths_dict, task_type)
     tensor_img = tensor_img.to(device)
 
-    print(f"Inferencia {task_type}. Tensor shape: {tensor_img.shape}")
+    print(f"Inferencia {task_type.value}. Tensor shape: {tensor_img.shape}")
 
     with torch.no_grad():
         output = sliding_window_inference(

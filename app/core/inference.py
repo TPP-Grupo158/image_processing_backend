@@ -241,16 +241,12 @@ def run_inference(saved_paths_dict, output_path, task_type: TaskType):
     
     Retorna:
     - Para ACV y Metástasis: ruta del archivo segmentado
-    - Para Alzheimer: diccionario con clasificación {"prediction": 0 o 1, "probability": float}
     """
-    
-    if task_type == TaskType.alzheimer:
-        return run_inference_alzheimer(saved_paths_dict)
     
     model = model_mets if task_type == TaskType.metastasis else model_acv
 
     if model is None:
-        raise ValueError(f"Modelo para {task_type.value} no cargado.")
+        raise ValueError(f"Modelo para {task_type} no cargado.")
 
     # Llamamos al nuevo preprocesador multicanal
     tensor_img, affine, header = preprocess_multichannel(

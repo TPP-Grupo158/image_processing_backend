@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import shutil
 import os
 import uuid
-from app.core.inference import load_models, run_inference, run_inference_alzheimer
+from app.core.inference import load_models, run_inference_alzheimer, run_inference_acv, run_inference_metastasis
 from app.core.storage import upload_file
 from app.core.database import save_prediction_metadata
 from app.errors.handlers import register_exception_handlers
@@ -75,7 +75,7 @@ async def predict_metastasis(
         output_filename = f"{temp_dir}/prediction.nii.gz"
 
         # 3. Corremos Inferencia (Pasamos el diccionario de rutas)
-        run_inference(saved_paths, output_filename, TaskType.metastasis)
+        run_inference_metastasis(saved_paths, output_filename, TaskType.metastasis)
 
         # 4. Subir a MinIO
         # Subimos solo el T1 como "original" para visualización rápida
@@ -144,7 +144,7 @@ async def predict_acv(
         output_filename = f"{temp_dir}/prediction.nii.gz"
 
         # 3. Corremos Inferencia (Pasamos el diccionario de rutas)
-        run_inference(saved_paths, output_filename, TaskType.acv)
+        run_inference_acv(saved_paths, output_filename, TaskType.acv)
 
         # 4. Subir a MinIO
         # Subimos solo el T1 como "original" para visualización rápida

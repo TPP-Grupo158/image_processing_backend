@@ -145,48 +145,40 @@ def preprocess_alzheimer(image_path):
     return tensor_img
 
 
-def preprocess_multichannel(paths_dict, task_type: TaskType):
+def preprocess_metastasis(paths_dict):
     """
-    Maneja la carga y fusión de múltiples canales.
+    Maneja la carga y fusión de múltiples canales para Metástasis.
     """
     # 1. Cargar el canal principal (T1) para obtener affine/header
     img_t1 = nib.load(paths_dict["t1"])
     affine = img_t1.affine
     header = img_t1.header
 
-    if task_type == TaskType.acv:
-        # Caso Simple: Solo 1 canal
-        data = img_t1.get_fdata()  # (H, W, D)
-        data = robust_normalization(data)
-        # Añadir canal dim: (C=1, H, W, D)
-        data = np.expand_dims(data, axis=0)
+    # Caso Metástasis: 4 Canales (T1, T1CE, T2, FLAIR)
+    # ORDEN CRÍTICO: Debe ser el mismo usado en el entrenamiento.
+    # Asumiremos el orden estándar de BraTS: [T1, T1CE, T2, FLAIR]
+    # Si tu modelo se entrenó en otro orden, cambia esta lista.
+    ordered_keys = ["t1", "t1ce", "t2", "flair"]
+    channels_data = []
 
-    else:
-        # Caso Metástasis: 4 Canales (T1, T1CE, T2, FLAIR)
-        # ORDEN CRÍTICO: Debe ser el mismo usado en el entrenamiento.
-        # Asumiremos el orden estándar de BraTS: [T1, T1CE, T2, FLAIR]
-        # Si tu modelo se entrenó en otro orden, cambia esta lista.
-        ordered_keys = ["t1", "t1ce", "t2", "flair"]
-        channels_data = []
+    for key in ordered_keys:
+        if key not in paths_dict:
+            raise ValueError(f"Falta la secuencia {key} para metástasis")
 
-        for key in ordered_keys:
-            if key not in paths_dict:
-                raise ValueError(f"Falta la secuencia {key} para metástasis")
+        img = nib.load(paths_dict[key])
+        d = img.get_fdata()
 
-            img = nib.load(paths_dict[key])
-            d = img.get_fdata()
+        # Chequeo de seguridad: Dimensiones iguales
+        if d.shape != img_t1.shape:
+            raise ValueError(
+                f"Dimension mismatch: {key} tiene shape {d.shape}, pero T1 tiene {img_t1.shape}")
 
-            # Chequeo de seguridad: Dimensiones iguales
-            if d.shape != img_t1.shape:
-                raise ValueError(
-                    f"Dimension mismatch: {key} tiene shape {d.shape}, pero T1 tiene {img_t1.shape}")
+        # Normalizar individualmente (Z-Score por canal)
+        d = z_score_normalization(d)
+        channels_data.append(d)
 
-            # Normalizar individualmente (Z-Score por canal)
-            d = z_score_normalization(d)
-            channels_data.append(d)
-
-        # Apilar canales: Resultado (4, H, W, D)
-        data = np.stack(channels_data, axis=0)
+    # Apilar canales: Resultado (4, H, W, D)
+    data = np.stack(channels_data, axis=0)
 
     # 2. Convertir a Tensor PyTorch (Batch, Channel, D, H, W)
     # Numpy es (C, H, W, D) -> PyTorch espera (B, C, D, H, W) usualmente para 3D
@@ -197,6 +189,30 @@ def preprocess_multichannel(paths_dict, task_type: TaskType):
     tensor = tensor.unsqueeze(0)  # Añadir Batch -> (1, 4, H, W, D)
 
     return tensor, affine, header
+
+def preprocess_acv(paths_dict):
+    # 1. Cargar el canal principal (T1) para obtener affine/header
+    img_t1 = nib.load(paths_dict["t1"])
+    affine = img_t1.affine
+    header = img_t1.header
+    
+    # Caso Simple: Solo 1 canal
+    data = img_t1.get_fdata()  # (H, W, D)
+    data = robust_normalization(data)
+    # Añadir canal dim: (C=1, H, W, D)
+    data = np.expand_dims(data, axis=0)
+
+    # 2. Convertir a Tensor PyTorch (Batch, Channel, D, H, W)
+    # Numpy es (C, H, W, D) -> PyTorch espera (B, C, D, H, W) usualmente para 3D
+    # Pero cuidado: nibabel carga (X, Y, Z).
+    # MONAI Sliding Window espera (Batch, Channel, Spatial...)
+
+    tensor = torch.from_numpy(data).float()
+    tensor = tensor.unsqueeze(0)  # Añadir Batch -> (1, 4, H, W, D)
+
+    return tensor, affine, header
+
+
 
 
 def run_inference_alzheimer(saved_paths_dict):
@@ -235,22 +251,26 @@ def run_inference_alzheimer(saved_paths_dict):
     }
 
 
-def run_inference(saved_paths_dict, output_path, task_type: TaskType):
+def _run_segmentation_inference(model, preprocess_fn, saved_paths_dict, output_path, task_type: TaskType):
     """
-    Recibe un diccionario de rutas {"t1": path, "t2": path...}
+    Función helper para ejecutar inferencia de segmentación.
+    Maneja la lógica común entre ACV y Metástasis.
+    
+    Args:
+        model: Modelo de segmentación
+        preprocess_fn: Función de preprocesamiento (preprocess_acv o preprocess_metastasis)
+        saved_paths_dict: Diccionario con rutas de archivos
+        output_path: Ruta donde guardar el resultado
+        task_type: Tipo de tarea (ACV o Metástasis)
     
     Retorna:
-    - Para ACV y Metástasis: ruta del archivo segmentado
+        Ruta del archivo segmentado
     """
-    
-    model = model_mets if task_type == TaskType.metastasis else model_acv
-
     if model is None:
-        raise ValueError(f"Modelo para {task_type} no cargado.")
+        raise ValueError(f"Modelo para {task_type.value} no cargado.")
 
-    # Llamamos al nuevo preprocesador multicanal
-    tensor_img, affine, header = preprocess_multichannel(
-        saved_paths_dict, task_type)
+    # Preprocesar imagen
+    tensor_img, affine, header = preprocess_fn(saved_paths_dict)
     tensor_img = tensor_img.to(device)
 
     print(f"Inferencia {task_type.value}. Tensor shape: {tensor_img.shape}")
@@ -275,3 +295,19 @@ def run_inference(saved_paths_dict, output_path, task_type: TaskType):
     nib.save(result_img, output_path)
 
     return output_path
+
+
+def run_inference_metastasis(saved_paths_dict, output_path, task_type: TaskType):
+    """
+    Ejecuta inferencia para Metástasis (4 canales).
+    Retorna la ruta del archivo segmentado.
+    """
+    return _run_segmentation_inference(model_mets, preprocess_metastasis, saved_paths_dict, output_path, task_type)
+
+
+def run_inference_acv(saved_paths_dict, output_path, task_type: TaskType):
+    """
+    Ejecuta inferencia para ACV (1 canal).
+    Retorna la ruta del archivo segmentado.
+    """
+    return _run_segmentation_inference(model_acv, preprocess_acv, saved_paths_dict, output_path, task_type)

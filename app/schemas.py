@@ -32,4 +32,4 @@ class AlzheimerPredictionResponse(BaseModel):
 class TaskType(str, Enum):
     metastasis = "metastasis"
     acv = "acv"
-    #alzheimer = "alzheimer"
+    alzheimer = "alzheimer"

@@ -38,7 +38,7 @@ app.add_middleware(
         500: {"model": APIErrorSchema},
     },
 )
-async def predict_endpoint(
+async def predict_metastasis(
     doctor_id: str = Form(...),
     # Definimos los 4 tipos de secuencias posibles
     file_t1: UploadFile = File(...),         # T1 es base para todos

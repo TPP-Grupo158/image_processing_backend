@@ -10,6 +10,16 @@ from app.core.database import save_prediction_metadata
 from app.errors.handlers import register_exception_handlers
 from app.errors.http_errors import InternalError
 from app.schemas import PredictionResponse, AlzheimerPredictionResponse, APIErrorSchema, TaskType
+from app.core.storage import upload_file, initialize_storage 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Iniciando carga de modelos AI...")
+    load_models()
+    print("Inicializando conexiones de almacenamiento...")
+    initialize_storage()  # Acá hago que se ejecute cuando se levante el contenedor, para asegurar que el bucket exista antes de cualquier operación de upload. Es idempotente, así que no hay riesgo de errores por recrear el bucket.
+    yield
+    print("Apagando servicio...")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

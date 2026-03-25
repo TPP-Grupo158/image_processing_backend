@@ -1,4 +1,5 @@
 from minio import Minio
+from minio.error import S3Error
 from app.core.config import settings
 
 # Cliente MinIO
@@ -9,13 +10,31 @@ client = Minio(
     secure=False  # False porque estamos en local sin HTTPS
 )
 
+def initialize_storage():
+    """
+    Verifica la existencia del bucket al iniciar la aplicación.
+    Si no existe, lo crea automáticamente.
+    """
+    try:
+        # Verifica si el bucket existe
+        if not client.bucket_exists(settings.MINIO_BUCKET):
+            client.make_bucket(settings.MINIO_BUCKET)
+            print(f"✅ Infraestructura: Bucket '{settings.MINIO_BUCKET}' creado exitosamente en MinIO.")
+        else:
+            print(f"✅ Infraestructura: Bucket '{settings.MINIO_BUCKET}' verificado y listo.")
+    except S3Error as e:
+        print(f"❌ Error crítico de S3 comunicándose con MinIO: {e}")
+        raise e
+    except Exception as e:
+        print(f"❌ Error inesperado en inicialización de storage: {e}")
+        raise e
 
 def upload_file(file_path: str, object_name: str) -> str:
     """
     Sube un archivo a MinIO y retorna la URL pública para el frontend.
     """
     try:
-        # Subir el archivo
+        # Subir el archivo (ya sabemos que el bucket existe por el lifespan)
         client.fput_object(
             settings.MINIO_BUCKET,
             object_name,
@@ -23,8 +42,6 @@ def upload_file(file_path: str, object_name: str) -> str:
             content_type="application/octet-stream"
         )
 
-        # Construir URL manual para que funcione en el navegador
-        # Formato: http://localhost:9000/medical-images/doctor_123/...
         url = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_BUCKET}/{object_name}"
         return url
 

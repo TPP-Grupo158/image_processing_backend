@@ -17,7 +17,7 @@ async def lifespan(app: FastAPI):
     print("Iniciando carga de modelos AI...")
     load_models()
     print("Inicializando conexiones de almacenamiento...")
-    initialize_storage()  # Acá hago que se ejecute cuando se levante el contenedor, para asegurar que el bucket exista antes de cualquier operación de upload. Es idempotente, así que no hay riesgo de errores por recrear el bucket.
+    initialize_storage()  # Se ejecuta cuando se levante el contenedor, para asegurar que el bucket exista antes de cualquier operación de upload
     yield
     print("Apagando servicio...")
 

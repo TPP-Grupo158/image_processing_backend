@@ -5,15 +5,19 @@ import shutil
 import os
 import uuid
 from app.core.inference import load_models, run_inference_alzheimer, run_inference_acv, run_inference_metastasis
-from app.core.storage import upload_file
 from app.core.database import save_prediction_metadata
 from app.errors.handlers import register_exception_handlers
 from app.errors.http_errors import InternalError
 from app.schemas import PredictionResponse, AlzheimerPredictionResponse, APIErrorSchema, TaskType
+from app.core.storage import upload_file, initialize_storage 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("Iniciando carga de modelos AI...")
     load_models()
+    print("Inicializando conexiones de almacenamiento...")
+    initialize_storage()  # Se ejecuta cuando se levante el contenedor, 
+    # para asegurar que el bucket exista antes de cualquier operacion de upload
     yield
     print("Apagando servicio...")
 

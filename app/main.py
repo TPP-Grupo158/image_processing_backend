@@ -1,9 +1,12 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
 import shutil
 import os
 import uuid
+
+# Importaciones de tu proyecto
 from app.core.inference import load_models, run_inference_alzheimer, run_inference_acv, run_inference_metastasis
 from app.core.database import save_prediction_metadata
 from app.errors.handlers import register_exception_handlers
@@ -11,13 +14,19 @@ from app.errors.http_errors import InternalError
 from app.schemas import PredictionResponse, AlzheimerPredictionResponse, APIErrorSchema, TaskType
 from app.core.storage import upload_file, initialize_storage 
 
+# ==========================================
+# 1. VARIABLE GLOBAL: Para El SEMÁFORO
+# ==========================================
+# Esta variable controla que solo pase 1 petición a la vez.
+is_processing = False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Iniciando carga de modelos AI...")
     load_models()
     print("Inicializando conexiones de almacenamiento...")
-    initialize_storage()  # Se ejecuta cuando se levante el contenedor, 
-    # para asegurar que el bucket exista antes de cualquier operacion de upload
+    initialize_storage()  
     yield
     print("Apagando servicio...")
 
@@ -31,65 +40,94 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==========================================
+# 2. ENDPOINT DE STATUS (Para el Frontend)
+# ==========================================
+@app.get("/status")
+async def get_system_status():
+    """
+    El frontend debe consumir este endpoint cada 2 o 3 segundos.
+    Retorna el estado actual del servidor para mostrar en la UI.
+    """
+    if is_processing:
+        return {
+            "status": "busy", 
+            "color": "red", 
+            "message": "El equipo está procesando otra imagen. Por favor, aguarde."
+        }
+    return {
+        "status": "free", 
+        "color": "green", 
+        "message": "Sistema listo para recibir imágenes."
+    }
+
+
+# ==========================================
+# 3. ENDPOINTS DE INFERENCIA
+# ==========================================
 
 @app.post(
     "/predict/metastasis",
     response_model=PredictionResponse,
     responses={
         400: {"model": APIErrorSchema},
-        404: {"model": APIErrorSchema},
-        422: {"model": APIErrorSchema},
         500: {"model": APIErrorSchema},
+        503: {"description": "Servidor Ocupado"}
     },
 )
 async def predict_metastasis(
     doctor_id: str = Form(...),
-    # Definimos los 4 tipos de secuencias posibles
-    file_t1: UploadFile = File(...),         # T1 es base para todos
-    file_t1ce: UploadFile = File(...),  # T1 con Contraste
-    file_t2: UploadFile = File(...),   # T2 
-    file_flair: UploadFile = File(...)  # FLAIR
+    file_t1: UploadFile = File(...),         
+    file_t1ce: UploadFile = File(...),  
+    file_t2: UploadFile = File(...),   
+    file_flair: UploadFile = File(...)  
 ):
-    """
-    - Para Metástasis: Requiere T1, T1CE, T2 y FLAIR.
-    """
-
-    # --- VALIDACIÓN DE ARCHIVOS REQUERIDOS ---
-    files_map = {
-            "t1": file_t1, "t1ce": file_t1ce, "t2": file_t2, "flair": file_flair
-        }
+    global is_processing
+    
+    # 3.A VERIFICA SEMÁFORO: Si está rojo, rechazar la petición inmediatamente
+    if is_processing:
+        raise HTTPException(
+            status_code=503, 
+            detail="El servidor está procesando otra petición. Intente en unos momentos."
+        )
 
     # Crear carpeta temporal única
     job_id = str(uuid.uuid4())
     temp_dir = f"/tmp/{job_id}"
     os.makedirs(temp_dir, exist_ok=True)
-
     saved_paths = {}
 
     try:
-        # 1. Guardamos todos los archivos recibidos en disco
+        # 3.B PONER SEMÁFORO EN ROJO
+        is_processing = True
+
+        # Guardar archivos recibidos en disco (Esto es rápido, no bloquea casi nada)
+        files_map = {"t1": file_t1, "t1ce": file_t1ce, "t2": file_t2, "flair": file_flair}
         for key, file_obj in files_map.items():
             file_path = f"{temp_dir}/{key}.nii.gz"
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file_obj.file, buffer)
             saved_paths[key] = file_path
         
-        # ACV y Metástasis: devuelven segmentación
-        # 2. Definir ruta de salida
         output_filename = f"{temp_dir}/prediction.nii.gz"
 
-        # 3. Corremos Inferencia (Pasamos el diccionario de rutas)
-        run_inference_metastasis(saved_paths, output_filename, TaskType.metastasis)
+        # 3.C EJECUTAR INFERENCIA EN THREADPOOL (Se hace el trabajo pesado en otro hilo, no bloquea el event loop de FastAPI)
+        # Esto libera a FastAPI para que siga respondiendo a los GET /status
+        await run_in_threadpool(
+            run_inference_metastasis, 
+            saved_paths, 
+            output_filename, 
+            TaskType.metastasis
+        )
 
-        # 4. Subir a MinIO
-        # Subimos solo el T1 como "original" para visualización rápida
+        # Subir a MinIO
         s3_path_in = f"{doctor_id}/{TaskType.metastasis.value}/{job_id}/input_t1.nii.gz"
         s3_path_out = f"{doctor_id}/{TaskType.metastasis.value}/{job_id}/prediction.nii.gz"
 
         url_in = upload_file(saved_paths["t1"], s3_path_in)
         url_out = upload_file(output_filename, s3_path_out)
 
-        # 5. Guardamos Metadata
+        # Guardar Metadata
         db_id = save_prediction_metadata(doctor_id, TaskType.metastasis.value, url_in, url_out)
 
         return PredictionResponse(
@@ -107,9 +145,9 @@ async def predict_metastasis(
         raise InternalError(detail=str(e))
 
     finally:
-        # Limpiar disco
+        # 3.D LIMPIEZA CRÍTICA: Pase lo que pase, liberamos el servidor y borramos archivos
+        is_processing = False
         shutil.rmtree(temp_dir, ignore_errors=True)
-
 
 
 @app.post(
@@ -117,48 +155,53 @@ async def predict_metastasis(
     response_model=PredictionResponse,
     responses={
         400: {"model": APIErrorSchema},
-        404: {"model": APIErrorSchema},
-        422: {"model": APIErrorSchema},
         500: {"model": APIErrorSchema},
+        503: {"description": "Servidor Ocupado"}
     },
 )
 async def predict_acv(
     doctor_id: str = Form(...),
     file_t1: UploadFile = File(...)
 ):
-    files_map = {"t1": file_t1}
+    global is_processing
     
-    # Crear carpeta temporal única
+    if is_processing:
+        raise HTTPException(
+            status_code=503, 
+            detail="El servidor está procesando otra petición. Intente en unos momentos."
+        )
+
+    files_map = {"t1": file_t1}
     job_id = str(uuid.uuid4())
     temp_dir = f"/tmp/{job_id}"
     os.makedirs(temp_dir, exist_ok=True)
-
     saved_paths = {}
 
     try:
-        # 1. Guardamos todos los archivos recibidos en disco
+        is_processing = True
+
         for key, file_obj in files_map.items():
             file_path = f"{temp_dir}/{key}.nii.gz"
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file_obj.file, buffer)
             saved_paths[key] = file_path
         
-        # ACV: devuelve segmentación
-        # 2. Definir ruta de salida
         output_filename = f"{temp_dir}/prediction.nii.gz"
 
-        # 3. Corremos Inferencia (Pasamos el diccionario de rutas)
-        run_inference_acv(saved_paths, output_filename, TaskType.acv)
+        # DELEGAR A THREADPOOL
+        await run_in_threadpool(
+            run_inference_acv, 
+            saved_paths, 
+            output_filename, 
+            TaskType.acv
+        )
 
-        # 4. Subir a MinIO
-        # Subimos solo el T1 como "original" para visualización rápida
         s3_path_in = f"{doctor_id}/{TaskType.acv.value}/{job_id}/input_t1.nii.gz"
         s3_path_out = f"{doctor_id}/{TaskType.acv.value}/{job_id}/prediction.nii.gz"
 
         url_in = upload_file(saved_paths["t1"], s3_path_in)
         url_out = upload_file(output_filename, s3_path_out)
 
-        # 5. Guardamos Metadata
         db_id = save_prediction_metadata(doctor_id, TaskType.acv.value, url_in, url_out)
 
         return PredictionResponse(
@@ -176,10 +219,8 @@ async def predict_acv(
         raise InternalError(detail=str(e))
 
     finally:
-        # Limpiar disco
+        is_processing = False
         shutil.rmtree(temp_dir, ignore_errors=True)
-
-    
 
 
 @app.post(
@@ -187,38 +228,41 @@ async def predict_acv(
     response_model=AlzheimerPredictionResponse,
     responses={
         400: {"model": APIErrorSchema},
-        404: {"model": APIErrorSchema},
-        422: {"model": APIErrorSchema},
         500: {"model": APIErrorSchema},
+        503: {"description": "Servidor Ocupado"}
     },
 )
 async def predict_alzheimer(
     doctor_id: str = Form(...),
     file_t1: UploadFile = File(...),
 ):
-    """Endpoint específico para Alzheimer. Solo requiere T1.
-    """
-    # Crear carpeta temporal única
+    global is_processing
+    
+    if is_processing:
+        raise HTTPException(
+            status_code=503, 
+            detail="El servidor está procesando otra petición. Intente en unos momentos."
+        )
+
     job_id = str(uuid.uuid4())
     temp_dir = f"/tmp/{job_id}"
     os.makedirs(temp_dir, exist_ok=True)
 
     try:
-        # Guardar archivo T1
+        is_processing = True
+
         file_path = f"{temp_dir}/t1.nii.gz"
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file_t1.file, buffer)
         
         saved_paths = {"t1": file_path}
 
-        # Correr inferencia
-        result = run_inference_alzheimer(saved_paths)
+        # DELEGAR A THREADPOOL (Atrapamos el valor de retorno dict)
+        result = await run_in_threadpool(run_inference_alzheimer, saved_paths)
         
-        # Subir solo la imagen original
         s3_path_in = f"{doctor_id}/alzheimer/{job_id}/input_t1.nii.gz"
         url_in = upload_file(saved_paths["t1"], s3_path_in)
         
-        # Guardar metadata
         db_id = save_prediction_metadata(doctor_id, TaskType.alzheimer.value, url_in, None)
         
         return AlzheimerPredictionResponse(
@@ -238,5 +282,5 @@ async def predict_alzheimer(
         raise InternalError(detail=str(e))
 
     finally:
-        # Limpiar disco
+        is_processing = False
         shutil.rmtree(temp_dir, ignore_errors=True)

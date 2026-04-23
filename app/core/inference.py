@@ -147,46 +147,33 @@ def preprocess_alzheimer(image_path):
 
 def preprocess_metastasis(paths_dict):
     """
-    Maneja la carga y fusión de múltiples canales para Metástasis.
+    Fusión de canales para Metástasis usando los nombres de secuencia.
+    Orden del tensor: [t1_pre, t1_gd, flair, bravo]
     """
-    # 1. Cargar el canal principal (T1) para obtener affine/header
-    img_t1 = nib.load(paths_dict["t1"])
-    affine = img_t1.affine
-    header = img_t1.header
+    # Usamos t1_pre como referencia para affine/header
+    img_ref = nib.load(paths_dict["t1_pre"])
+    affine = img_ref.affine
+    header = img_ref.header
 
-    # Caso Metástasis: 4 Canales (T1, T1CE, T2, FLAIR)
-    # ORDEN CRÍTICO: Debe ser el mismo usado en el entrenamiento.
-    # Asumiremos el orden estándar de BraTS: [T1, T1CE, T2, FLAIR]
-    # Si tu modelo se entrenó en otro orden, cambia esta lista.
-    ordered_keys = ["t1", "t1ce", "t2", "flair"]
+    # Nuevo orden solicitado por el usuario
+    ordered_keys = ["t1_pre", "t1_gd", "flair", "bravo"]
     channels_data = []
 
     for key in ordered_keys:
         if key not in paths_dict:
-            raise ValueError(f"Falta la secuencia {key} para metástasis")
+            raise ValueError(f"Falta la secuencia obligatoria: {key}")
 
         img = nib.load(paths_dict[key])
         d = img.get_fdata()
 
-        # Chequeo de seguridad: Dimensiones iguales
-        if d.shape != img_t1.shape:
-            raise ValueError(
-                f"Dimension mismatch: {key} tiene shape {d.shape}, pero T1 tiene {img_t1.shape}")
+        if d.shape != img_ref.shape:
+            raise ValueError(f"Error de dimensiones: {key} {d.shape} != t1_pre {img_ref.shape}")
 
-        # Normalizar individualmente (Z-Score por canal)
         d = z_score_normalization(d)
         channels_data.append(d)
 
-    # Apilar canales: Resultado (4, H, W, D)
-    data = np.stack(channels_data, axis=0)
-
-    # 2. Convertir a Tensor PyTorch (Batch, Channel, D, H, W)
-    # Numpy es (C, H, W, D) -> PyTorch espera (B, C, D, H, W) usualmente para 3D
-    # Pero cuidado: nibabel carga (X, Y, Z).
-    # MONAI Sliding Window espera (Batch, Channel, Spatial...)
-
-    tensor = torch.from_numpy(data).float()
-    tensor = tensor.unsqueeze(0)  # Añadir Batch -> (1, 4, H, W, D)
+    data = np.stack(channels_data, axis=0) # (4, H, W, D)
+    tensor = torch.from_numpy(data).float().unsqueeze(0) # (1, 4, H, W, D)
 
     return tensor, affine, header
 

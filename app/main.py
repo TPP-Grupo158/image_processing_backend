@@ -5,14 +5,15 @@ from contextlib import asynccontextmanager
 import shutil
 import os
 import uuid
+from typing import Dict
 
-# Importaciones de tu proyecto
+# Importaciones del proyecto
 from app.core.inference import load_models, run_inference_alzheimer, run_inference_acv, run_inference_metastasis
 from app.core.database import save_prediction_metadata
 from app.errors.handlers import register_exception_handlers
 from app.errors.http_errors import InternalError
 from app.schemas import PredictionResponse, AlzheimerPredictionResponse, APIErrorSchema, TaskType
-from app.core.storage import upload_file, initialize_storage 
+from app.core.storage import upload_file, initialize_storage
 
 # ==========================================
 # 1. VARIABLE GLOBAL: Para El SEMÁFORO
@@ -66,158 +67,132 @@ async def get_system_status():
 # 3. ENDPOINTS DE INFERENCIA
 # ==========================================
 
-@app.post(
-    "/predict/metastasis",
-    response_model=PredictionResponse,
-    responses={
-        400: {"model": APIErrorSchema},
-        500: {"model": APIErrorSchema},
-        503: {"description": "Servidor Ocupado"}
-    },
-)
+@app.post("/predict/metastasis", response_model=PredictionResponse)
 async def predict_metastasis(
     doctor_id: str = Form(...),
-    file_t1: UploadFile = File(...),         
-    file_t1ce: UploadFile = File(...),  
-    file_t2: UploadFile = File(...),   
-    file_flair: UploadFile = File(...)  
+    paciente_id: str = Form(...),
+    t1_pre: UploadFile = File(...),         
+    t1_gd: UploadFile = File(...),  
+    flair: UploadFile = File(...),   
+    bravo: UploadFile = File(...)  
 ):
     global is_processing
-    
-    # 3.A VERIFICA SEMÁFORO: Si está rojo, rechazar la petición inmediatamente
     if is_processing:
-        raise HTTPException(
-            status_code=503, 
-            detail="El servidor está procesando otra petición. Intente en unos momentos."
-        )
+        raise HTTPException(status_code=503, detail="Servidor ocupado")
 
-    # Crear carpeta temporal única
-    job_id = str(uuid.uuid4())
-    temp_dir = f"/tmp/{job_id}"
+    study_id = str(uuid.uuid4())
+    temp_dir = f"/tmp/{study_id}"
     os.makedirs(temp_dir, exist_ok=True)
+    
     saved_paths = {}
+    input_urls = {}
 
     try:
-        # 3.B PONER SEMÁFORO EN ROJO
         is_processing = True
 
-        # Guardar archivos recibidos en disco (Esto es rápido, no bloquea casi nada)
-        files_map = {"t1": file_t1, "t1ce": file_t1ce, "t2": file_t2, "flair": file_flair}
+        # 1. Guardar localmente para procesamiento
+        files_map = {"t1_pre": t1_pre, "t1_gd": t1_gd, "flair": flair, "bravo": bravo}
         for key, file_obj in files_map.items():
-            file_path = f"{temp_dir}/{key}.nii.gz"
+            file_path = os.path.join(temp_dir, f"{key}.nii.gz")
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file_obj.file, buffer)
             saved_paths[key] = file_path
         
-        output_filename = f"{temp_dir}/prediction.nii.gz"
+        output_local = os.path.join(temp_dir, "prediction.nii.gz")
 
-        # 3.C EJECUTAR INFERENCIA EN THREADPOOL (Se hace el trabajo pesado en otro hilo, no bloquea el event loop de FastAPI)
-        # Esto libera a FastAPI para que siga respondiendo a los GET /status
+        # 2. Inferencia
         await run_in_threadpool(
-            run_inference_metastasis, 
-            saved_paths, 
-            output_filename, 
-            TaskType.metastasis
+            run_inference_metastasis, saved_paths, output_local, TaskType.metastasis
         )
 
-        # Subir a MinIO
-        s3_path_in = f"{doctor_id}/{TaskType.metastasis.value}/{job_id}/input_t1.nii.gz"
-        s3_path_out = f"{doctor_id}/{TaskType.metastasis.value}/{job_id}/prediction.nii.gz"
+        # 3. Subida estructurada a MinIO: {paciente_id}/{task}/{uuid}/{file}
+        for key, local_path in saved_paths.items():
+            s3_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/{key}.nii.gz"
+            input_urls[key] = upload_file(local_path, s3_path)
 
-        url_in = upload_file(saved_paths["t1"], s3_path_in)
-        url_out = upload_file(output_filename, s3_path_out)
+        s3_prediction_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/prediction.nii.gz"
+        prediction_url = upload_file(output_local, s3_prediction_path)
 
-        # Guardar Metadata
-        db_id = save_prediction_metadata(doctor_id, TaskType.metastasis.value, url_in, url_out)
+        # 4. Persistencia en MongoDB
+        db_id = save_prediction_metadata(
+            doctor_id=doctor_id,
+            paciente_id=paciente_id,
+            task_type=TaskType.metastasis.value,
+            input_images=input_urls,
+            prediction_url=prediction_url
+        )
 
         return PredictionResponse(
             status="success",
             db_id=db_id,
-            original_image=url_in,
-            prediction_image=url_out,
-            task=TaskType.metastasis,
+            paciente_id=paciente_id,
+            doctor_id=doctor_id,
+            original_images=input_urls,
+            prediction_image=prediction_url,
+            task=TaskType.metastasis.value,
             modalities_used=list(saved_paths.keys())
         )
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise InternalError(detail=str(e))
-
     finally:
-        # 3.D LIMPIEZA CRÍTICA: Pase lo que pase, liberamos el servidor y borramos archivos
         is_processing = False
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-
-@app.post(
-    "/predict/acv",
-    response_model=PredictionResponse,
-    responses={
-        400: {"model": APIErrorSchema},
-        500: {"model": APIErrorSchema},
-        503: {"description": "Servidor Ocupado"}
-    },
-)
+@app.post("/predict/acv", response_model=PredictionResponse)
 async def predict_acv(
     doctor_id: str = Form(...),
+    paciente_id: str = Form(...),
     file_t1: UploadFile = File(...)
 ):
     global is_processing
-    
     if is_processing:
-        raise HTTPException(
-            status_code=503, 
-            detail="El servidor está procesando otra petición. Intente en unos momentos."
-        )
+        raise HTTPException(status_code=503, detail="Servidor ocupado")
 
-    files_map = {"t1": file_t1}
-    job_id = str(uuid.uuid4())
-    temp_dir = f"/tmp/{job_id}"
+    study_id = str(uuid.uuid4())
+    temp_dir = f"/tmp/{study_id}"
     os.makedirs(temp_dir, exist_ok=True)
-    saved_paths = {}
 
     try:
         is_processing = True
-
-        for key, file_obj in files_map.items():
-            file_path = f"{temp_dir}/{key}.nii.gz"
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(file_obj.file, buffer)
-            saved_paths[key] = file_path
+        local_t1 = os.path.join(temp_dir, "file_t1.nii.gz")
+        with open(local_t1, "wb") as buffer:
+            shutil.copyfileobj(file_t1.file, buffer)
         
-        output_filename = f"{temp_dir}/prediction.nii.gz"
-
-        # DELEGAR A THREADPOOL
+        output_local = os.path.join(temp_dir, "prediction.nii.gz")
+        
         await run_in_threadpool(
-            run_inference_acv, 
-            saved_paths, 
-            output_filename, 
-            TaskType.acv
+            run_inference_acv, {"t1": local_t1}, output_local, TaskType.acv
         )
 
-        s3_path_in = f"{doctor_id}/{TaskType.acv.value}/{job_id}/input_t1.nii.gz"
-        s3_path_out = f"{doctor_id}/{TaskType.acv.value}/{job_id}/prediction.nii.gz"
+        # Estructura MinIO
+        s3_t1_path = f"{paciente_id}/{TaskType.acv.value}/{study_id}/file_t1.nii.gz"
+        s3_pred_path = f"{paciente_id}/{TaskType.acv.value}/{study_id}/prediction.nii.gz"
 
-        url_in = upload_file(saved_paths["t1"], s3_path_in)
-        url_out = upload_file(output_filename, s3_path_out)
+        url_t1 = upload_file(local_t1, s3_t1_path)
+        url_pred = upload_file(output_local, s3_pred_path)
 
-        db_id = save_prediction_metadata(doctor_id, TaskType.acv.value, url_in, url_out)
+        db_id = save_prediction_metadata(
+            doctor_id=doctor_id,
+            paciente_id=paciente_id,
+            task_type=TaskType.acv.value,
+            input_images={"t1": url_t1},
+            prediction_url=url_pred
+        )
 
         return PredictionResponse(
             status="success",
             db_id=db_id,
-            original_image=url_in,
-            prediction_image=url_out,
-            task=TaskType.acv,
-            modalities_used=list(saved_paths.keys())
+            paciente_id=paciente_id,
+            doctor_id=doctor_id,
+            original_images={"t1": url_t1},
+            prediction_image=url_pred,
+            task=TaskType.acv.value,
+            modalities_used=["t1"]
         )
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise InternalError(detail=str(e))
-
     finally:
         is_processing = False
         shutil.rmtree(temp_dir, ignore_errors=True)

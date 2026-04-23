@@ -1,18 +1,18 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 from contextlib import asynccontextmanager
 import shutil
 import os
 import uuid
-from typing import Dict
+from typing import Dict, List #  List por si lo usa algún esquema
 
 # Importaciones del proyecto
 from app.core.inference import load_models, run_inference_alzheimer, run_inference_acv, run_inference_metastasis
-from app.core.database import save_prediction_metadata
+from app.core.database import save_prediction_metadata, get_paginated_history
 from app.errors.handlers import register_exception_handlers
 from app.errors.http_errors import InternalError
-from app.schemas import PredictionResponse, AlzheimerPredictionResponse, APIErrorSchema, TaskType
+from app.schemas import PredictionResponse, AlzheimerPredictionResponse, APIErrorSchema, TaskType, PaginatedHistoryResponse
 from app.core.storage import upload_file, initialize_storage
 
 # ==========================================
@@ -259,3 +259,48 @@ async def predict_alzheimer(
     finally:
         is_processing = False
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+# ==========================================
+# 4. ENDPOINTS DE HISTORIAL (GET)
+# ==========================================
+
+@app.get(
+    "/history/patient/{paciente_id}", 
+    response_model=PaginatedHistoryResponse,
+    summary="Obtener historial de un paciente",
+    description="Devuelve todos los estudios asociados a un paciente específico, ordenados por fecha descendente y paginados."
+)
+async def get_patient_history(
+    paciente_id: str,
+    page: int = Query(1, ge=1, description="Número de página a consultar (comienza en 1)"),
+    limit: int = Query(10, ge=1, le=100, description="Cantidad máxima de registros por página (máximo 100)")
+):
+    try:
+        # El filtro busca coincidencia exacta con el paciente_id
+        result = get_paginated_history({"paciente_id": paciente_id}, page, limit)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise InternalError(detail=str(e))
+
+
+@app.get(
+    "/history/doctor/{doctor_id}", 
+    response_model=PaginatedHistoryResponse,
+    summary="Obtener historial de un médico",
+    description="Devuelve todos los estudios realizados por un médico específico, abarcando a todos sus pacientes, ordenados por fecha y paginados."
+)
+async def get_doctor_history(
+    doctor_id: str,
+    page: int = Query(1, ge=1, description="Número de página a consultar (comienza en 1)"),
+    limit: int = Query(10, ge=1, le=100, description="Cantidad máxima de registros por página (máximo 100)")
+):
+    try:
+        # El filtro busca coincidencia exacta con el doctor_id
+        result = get_paginated_history({"doctor_id": doctor_id}, page, limit)
+        return result
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise InternalError(detail=str(e))

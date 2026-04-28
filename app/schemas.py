@@ -1,31 +1,37 @@
 from pydantic import BaseModel, HttpUrl
-from typing import List
+from typing import List, Dict
 from enum import Enum
+from datetime import datetime
 
-# Error response schema send to the user in case of an error
+
 class APIErrorSchema(BaseModel):
     type: str
     status: int
     detail: str
 
-# Prediction response schema for segmentation tasks (ACV, Metastasis)
+
 class PredictionResponse(BaseModel):
     status: str
     db_id: str
-    original_image: HttpUrl
+    paciente_id: str
+    doctor_id: str
+    # Diccionario para mapear modalidad -> URL en MinIO
+    original_images: Dict[str, HttpUrl]
     prediction_image: HttpUrl
     task: str
     modalities_used: List[str]
 
-# Classification response schema for Alzheimer
+
 class AlzheimerPredictionResponse(BaseModel):
     status: str
     db_id: str
+    paciente_id: str
+    doctor_id: str
     original_image: HttpUrl
     task: str
-    prediction: int  # 0 or 1
-    probability: float  # Probability of positive class
-    threshold: float  # Threshold used for classification
+    prediction: int
+    probability: float
+    threshold: float
     modalities_used: List[str]
 
 
@@ -33,3 +39,34 @@ class TaskType(str, Enum):
     metastasis = "metastasis"
     acv = "acv"
     alzheimer = "alzheimer"
+
+
+class HistoryRecord(BaseModel):
+    """Esquema que representa un estudio individual en el historial."""
+
+    id: str
+    doctor_id: str
+    paciente_id: str
+    task_type: str
+    created_at: datetime
+    # Usamos un diccionario genérico para soportar 1 (ACV) o 4 (Mets) modalidades
+    original_images: Dict[str, str]
+    prediction_image: str | None = None
+    status: str
+
+
+class PaginationMeta(BaseModel):
+    """Metadatos para el control de paginación en el frontend."""
+
+    total_records: int
+    current_page: int
+    total_pages: int
+    has_next: bool
+    has_prev: bool
+
+
+class PaginatedHistoryResponse(BaseModel):
+    """Respuesta estándar para los endpoints de historial."""
+
+    data: List[HistoryRecord]
+    meta: PaginationMeta

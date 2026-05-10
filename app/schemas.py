@@ -15,9 +15,9 @@ class PredictionResponse(BaseModel):
     db_id: str
     paciente_id: str
     doctor_id: str
-    # Diccionario para mapear modalidad -> URL en MinIO
     original_images: Dict[str, HttpUrl]
     prediction_image: HttpUrl
+    visualization_image: HttpUrl | None = None  # URL del JPG
     task: str
     modalities_used: List[str]
 
@@ -42,22 +42,18 @@ class TaskType(str, Enum):
 
 
 class HistoryRecord(BaseModel):
-    """Esquema que representa un estudio individual en el historial."""
-
     id: str
     doctor_id: str
     paciente_id: str
     task_type: str
     created_at: datetime
-    # Usamos un diccionario genérico para soportar 1 (ACV) o 4 (Mets) modalidades
     original_images: Dict[str, str]
     prediction_image: str | None = None
+    visualization_image: str | None = None  # Para JPG en el historial
     status: str
 
 
 class PaginationMeta(BaseModel):
-    """Metadatos para el control de paginación en el frontend."""
-
     total_records: int
     current_page: int
     total_pages: int
@@ -66,7 +62,5 @@ class PaginationMeta(BaseModel):
 
 
 class PaginatedHistoryResponse(BaseModel):
-    """Respuesta estándar para los endpoints de historial."""
-
     data: List[HistoryRecord]
     meta: PaginationMeta

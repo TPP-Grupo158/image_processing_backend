@@ -29,7 +29,7 @@ exclude = [
     "venv",
 ]
 
-line-length = 125
+line-length = 150
 target-version = "py314"
 indent-width = 4
 

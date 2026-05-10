@@ -1,5 +1,6 @@
 import io
 import pytest
+from datetime import datetime  # <-- NUEVO: Importar datetime
 
 
 def get_dummy_file(filename="test.nii.gz"):
@@ -30,7 +31,6 @@ def test_predict_acv_success(client, mock_mongo):
     assert res_data["paciente_id"] == "Paciente123"
     assert "fake.nii.gz" in res_data["prediction_image"]
 
-    # Verificar que MongoMock insertó la metadata
     assert mock_mongo.count_documents({}) == 1
 
 
@@ -46,7 +46,6 @@ def test_predict_acv_invalid_extension(client):
 
 def test_predict_acv_missing_fields(client):
     files = {"file_t1": get_dummy_file()}
-    # Falta el paciente_id o está vacío
     data = {"doctor_id": "DrSmith", "paciente_id": "  "}
 
     response = client.post("/predict/acv", data=data, files=files)
@@ -84,12 +83,15 @@ def test_predict_alzheimer_success(client):
 
 
 def test_history_endpoints(client, mock_mongo):
-    # Insertar registros ficticios en el MongoMock
+    # NUEVO: Generamos un timestamp falso para cumplir con Pydantic
+    fake_time = datetime.utcnow()
+
+    # Insertar registros ficticios con 'created_at'
     mock_mongo.insert_many(
         [
-            {"doctor_id": "DrA", "paciente_id": "Pac1", "task_type": "acv", "status": "completed"},
-            {"doctor_id": "DrA", "paciente_id": "Pac2", "task_type": "metastasis", "status": "completed"},
-            {"doctor_id": "DrB", "paciente_id": "Pac1", "task_type": "alzheimer", "status": "completed"},
+            {"doctor_id": "DrA", "paciente_id": "Pac1", "task_type": "acv", "status": "completed", "created_at": fake_time},
+            {"doctor_id": "DrA", "paciente_id": "Pac2", "task_type": "metastasis", "status": "completed", "created_at": fake_time},
+            {"doctor_id": "DrB", "paciente_id": "Pac1", "task_type": "alzheimer", "status": "completed", "created_at": fake_time},
         ]
     )
 

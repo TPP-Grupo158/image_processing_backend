@@ -10,7 +10,7 @@ from app.core.inference import load_models, run_inference_alzheimer, run_inferen
 from app.core.database import save_prediction_metadata, get_paginated_history
 from app.errors.handlers import register_exception_handlers
 from app.errors.http_errors import InternalError
-from app.schemas import PredictionResponse, AlzheimerPredictionResponse, APIErrorSchema, TaskType, PaginatedHistoryResponse
+from app.schemas import PredictionResponse, AlzheimerPredictionResponse, TaskType, PaginatedHistoryResponse
 from app.core.storage import upload_file, initialize_storage
 
 is_processing = False

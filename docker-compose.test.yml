@@ -1,19 +1,17 @@
-version: '3.8'
-
 services:
   test_runner:
     build: 
       context: .
       dockerfile: Dockerfile
     container_name: fast_api_tester
-    # Sobrescribimos el comando de inicio para que corra los tests y no uvicorn
+    # CAMBIO AQUÍ: Usamos 'python -m pytest' y seteamos PYTHONPATH por seguridad
     command: >
       bash -c "pip install -r requirements-test.txt && 
-               pytest app/tests/ -v --cov=app --cov-report=term-missing"
+               PYTHONPATH=/code python -m pytest app/tests/ -v --cov=app --cov-report=term-missing"
     environment:
       - MONGO_URI=mongodb://fake-uri:27017
       - MINIO_ACCESS_KEY=fakekey
       - MINIO_SECRET_KEY=fakesecret
       - TESTING_MODE=True
     volumes:
-      - .:/code # Mapea el código en vivo para no tener que hacer build a cada rato
+      - .:/code

@@ -19,3 +19,8 @@ minio_data/
 
 # Linter
 .ruff_cache/
+
+# Coverage
+.coverage
+htmlcov/
+coverage.xml

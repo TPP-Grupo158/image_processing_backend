@@ -3,6 +3,7 @@ from app.core.config import settings
 from datetime import datetime
 from typing import Dict, Optional, Any
 import math
+import os
 
 client = MongoClient(settings.MONGO_URI)
 db = client[settings.DB_NAME]
@@ -11,11 +12,20 @@ collection = db["predictions"]
 # ==========================================
 # CREACIÓN DE ÍNDICES EN MONGO:
 # ==========================================
-# Al crear índices, las búsquedas por paciente o médico van  pasar de
+# Al crear índices, las búsquedas por paciente o médico van pasar de
 # complejidad O(N) a O(log N), optimizando la base de datos drásticamente.
-collection.create_index("paciente_id")
-collection.create_index("doctor_id")
-collection.create_index([("created_at", -1)])
+
+# CONTROL DE ENTORNO DE TESTING:
+# PyMongo tiene inicialización Lazy , pero métodos como
+# create_index fuerzan una conexión inmediata a la base de datos.
+# Durante la ejecución de la suite de pruebas (Pytest), este archivo es importado ANTES
+# de que las fixtures de simulación (mongomock) estén completamente montadas.
+# Si no verificamos la variable TESTING_MODE, el contenedor de pruebas colapsará por timeout
+# intentando resolver la URI ficticia de la base de datos.
+if not os.getenv("TESTING_MODE"):
+    collection.create_index("paciente_id")
+    collection.create_index("doctor_id")
+    collection.create_index([("created_at", -1)])
 
 
 def save_prediction_metadata(

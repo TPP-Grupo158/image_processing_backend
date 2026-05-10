@@ -7,8 +7,9 @@ client = Minio(
     settings.MINIO_ENDPOINT,
     access_key=settings.MINIO_ACCESS_KEY,
     secret_key=settings.MINIO_SECRET_KEY,
-    secure=False  # False porque estamos en local sin HTTPS
+    secure=False,  # False porque estamos en local sin HTTPS
 )
+
 
 def initialize_storage():
     """
@@ -29,18 +30,14 @@ def initialize_storage():
         print(f"❌ Error inesperado en inicialización de storage: {e}")
         raise e
 
+
 def upload_file(file_path: str, object_name: str) -> str:
     """
     Sube un archivo a MinIO y retorna la URL pública para el frontend.
     """
     try:
         # Subir el archivo (ya sabemos que el bucket existe por el lifespan)
-        client.fput_object(
-            settings.MINIO_BUCKET,
-            object_name,
-            file_path,
-            content_type="application/octet-stream"
-        )
+        client.fput_object(settings.MINIO_BUCKET, object_name, file_path, content_type="application/octet-stream")
 
         url = f"{settings.MINIO_PUBLIC_URL}/{settings.MINIO_BUCKET}/{object_name}"
         return url

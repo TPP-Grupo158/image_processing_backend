@@ -11,3 +11,4 @@ python-dotenv
 monai  # Estándar de oro para inferencia médica (sliding window)
 scipy
 ruff
+matplotlib

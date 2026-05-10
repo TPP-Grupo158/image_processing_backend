@@ -7,7 +7,13 @@ import os
 import uuid
 
 # Importaciones del proyecto
-from app.core.inference import load_models, run_inference_alzheimer, run_inference_acv, run_inference_metastasis
+from app.core.inference import (
+    load_models,
+    run_inference_alzheimer,
+    run_inference_acv,
+    run_inference_metastasis,
+    create_best_slice_visualization,
+)
 from app.core.database import save_prediction_metadata, get_paginated_history
 from app.errors.handlers import register_exception_handlers
 from app.errors.http_errors import InternalError
@@ -97,7 +103,14 @@ async def predict_metastasis(
         # 2. Inferencia
         await run_in_threadpool(run_inference_metastasis, saved_paths, output_local, TaskType.metastasis)
 
-        # 3. Subida estructurada a MinIO: {paciente_id}/{task}/{uuid}/{file}
+        # Generar JPG del mejor corte. Elegimos t1_gd o bravo como representativo estructural
+        rep_img_path = saved_paths.get("t1_gd", saved_paths.get("bravo", saved_paths["t1_pre"]))
+        jpg_local = os.path.join(temp_dir, "visualization.jpg")
+        await run_in_threadpool(
+            create_best_slice_visualization, rep_img_path, output_local, paciente_id, jpg_local, TaskType.metastasis
+        )
+
+        # Subida a MinIO
         for key, local_path in saved_paths.items():
             s3_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/{key}.nii.gz"
             input_urls[key] = upload_file(local_path, s3_path)
@@ -105,13 +118,17 @@ async def predict_metastasis(
         s3_prediction_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/prediction.nii.gz"
         prediction_url = upload_file(output_local, s3_prediction_path)
 
-        # 4. Persistencia en MongoDB
+        # Subir JPG a MinIO
+        s3_jpg_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/visualization.jpg"
+        visualization_url = upload_file(jpg_local, s3_jpg_path)
+
         db_id = save_prediction_metadata(
             doctor_id=doctor_id,
             paciente_id=paciente_id,
             task_type=TaskType.metastasis.value,
             input_images=input_urls,
             prediction_url=prediction_url,
+            visualization_url=visualization_url,  # Se pasa a la BD
         )
 
         return PredictionResponse(
@@ -121,6 +138,7 @@ async def predict_metastasis(
             doctor_id=doctor_id,
             original_images=input_urls,
             prediction_image=prediction_url,
+            visualization_image=visualization_url,
             task=TaskType.metastasis.value,
             modalities_used=list(saved_paths.keys()),
         )
@@ -149,15 +167,22 @@ async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), 
             shutil.copyfileobj(file_t1.file, buffer)
 
         output_local = os.path.join(temp_dir, "prediction.nii.gz")
-
         await run_in_threadpool(run_inference_acv, {"t1": local_t1}, output_local, TaskType.acv)
 
-        # Estructura MinIO
+        # Generar JPG
+        jpg_local = os.path.join(temp_dir, "visualization.jpg")
+        await run_in_threadpool(
+            create_best_slice_visualization, local_t1, output_local, paciente_id, jpg_local, TaskType.acv
+        )
+
+        # Subida a MinIO
         s3_t1_path = f"{paciente_id}/{TaskType.acv.value}/{study_id}/file_t1.nii.gz"
         s3_pred_path = f"{paciente_id}/{TaskType.acv.value}/{study_id}/prediction.nii.gz"
+        s3_jpg_path = f"{paciente_id}/{TaskType.acv.value}/{study_id}/visualization.jpg"
 
         url_t1 = upload_file(local_t1, s3_t1_path)
         url_pred = upload_file(output_local, s3_pred_path)
+        url_jpg = upload_file(jpg_local, s3_jpg_path)
 
         db_id = save_prediction_metadata(
             doctor_id=doctor_id,
@@ -165,6 +190,7 @@ async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), 
             task_type=TaskType.acv.value,
             input_images={"t1": url_t1},
             prediction_url=url_pred,
+            visualization_url=url_jpg,
         )
 
         return PredictionResponse(
@@ -174,6 +200,7 @@ async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), 
             doctor_id=doctor_id,
             original_images={"t1": url_t1},
             prediction_image=url_pred,
+            visualization_image=url_jpg,
             task=TaskType.acv.value,
             modalities_used=["t1"],
         )
@@ -190,14 +217,10 @@ async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), 
     response_model=AlzheimerPredictionResponse,
     responses={400: {"model": APIErrorSchema}, 500: {"model": APIErrorSchema}, 503: {"description": "Servidor Ocupado"}},
 )
-async def predict_alzheimer(
-    doctor_id: str = Form(...),
-    file_t1: UploadFile = File(...),
-):
+async def predict_alzheimer(doctor_id: str = Form(...), file_t1: UploadFile = File(...)):
     global is_processing
-
     if is_processing:
-        raise HTTPException(status_code=503, detail="El servidor está procesando otra petición. Intente en unos momentos.")
+        raise HTTPException(status_code=503, detail="El servidor está procesando otra petición.")
 
     job_id = str(uuid.uuid4())
     temp_dir = f"/tmp/{job_id}"
@@ -205,24 +228,23 @@ async def predict_alzheimer(
 
     try:
         is_processing = True
-
         file_path = f"{temp_dir}/t1.nii.gz"
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file_t1.file, buffer)
 
         saved_paths = {"t1": file_path}
-
-        # DELEGAR A THREADPOOL (Atrapamos el valor de retorno dict)
         result = await run_in_threadpool(run_inference_alzheimer, saved_paths)
 
         s3_path_in = f"{doctor_id}/alzheimer/{job_id}/input_t1.nii.gz"
         url_in = upload_file(saved_paths["t1"], s3_path_in)
 
-        db_id = save_prediction_metadata(doctor_id, TaskType.alzheimer.value, url_in, None)
+        db_id = save_prediction_metadata(doctor_id, "paciente_anonimo", TaskType.alzheimer.value, {"t1": url_in}, None)
 
         return AlzheimerPredictionResponse(
             status="success",
             db_id=db_id,
+            paciente_id="paciente_anonimo",
+            doctor_id=doctor_id,
             original_image=url_in,
             task=TaskType.alzheimer.value,
             prediction=result["prediction"],
@@ -230,67 +252,29 @@ async def predict_alzheimer(
             threshold=result["threshold"],
             modalities_used=list(saved_paths.keys()),
         )
-
     except Exception as e:
         import traceback
 
         traceback.print_exc()
         raise InternalError(detail=str(e))
-
     finally:
         is_processing = False
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-# ==========================================
-# 4. ENDPOINTS DE HISTORIAL (GET)
-# ==========================================
-
-
-@app.get(
-    "/history/patient/{paciente_id}",
-    response_model=PaginatedHistoryResponse,
-    summary="Obtener historial de un paciente",
-    description=(
-        "Devuelve todos los estudios asociados a un paciente específico, ordenados por fecha descendente y paginados."
-    ),
-)
-async def get_patient_history(
-    paciente_id: str,
-    page: int = Query(1, ge=1, description="Número de página a consultar (comienza en 1)"),
-    limit: int = Query(10, ge=1, le=100, description="Cantidad máxima de registros por página (máximo 100)"),
-):
+@app.get("/history/patient/{paciente_id}", response_model=PaginatedHistoryResponse)
+async def get_patient_history(paciente_id: str, page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100)):
     try:
-        # El filtro busca coincidencia exacta con el paciente_id
         result = get_paginated_history({"paciente_id": paciente_id}, page, limit)
         return result
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
         raise InternalError(detail=str(e))
 
 
-@app.get(
-    "/history/doctor/{doctor_id}",
-    response_model=PaginatedHistoryResponse,
-    summary="Obtener historial de un médico",
-    description=(
-        "Devuelve todos los estudios realizados por un médico específico, "
-        "abarcando a todos sus pacientes, ordenados por fecha y paginados."
-    ),
-)
-async def get_doctor_history(
-    doctor_id: str,
-    page: int = Query(1, ge=1, description="Número de página a consultar (comienza en 1)"),
-    limit: int = Query(10, ge=1, le=100, description="Cantidad máxima de registros por página (máximo 100)"),
-):
+@app.get("/history/doctor/{doctor_id}", response_model=PaginatedHistoryResponse)
+async def get_doctor_history(doctor_id: str, page: int = Query(1, ge=1), limit: int = Query(10, ge=1, le=100)):
     try:
-        # El filtro busca coincidencia exacta con el doctor_id
         result = get_paginated_history({"doctor_id": doctor_id}, page, limit)
         return result
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
         raise InternalError(detail=str(e))

@@ -1,5 +1,4 @@
 import io
-import pytest
 from datetime import datetime  # <-- NUEVO: Importar datetime
 
 

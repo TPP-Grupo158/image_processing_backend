@@ -240,7 +240,7 @@ def create_best_slice_visualization(orig_path, pred_path, paciente_id, output_jp
     # Panel B: Predicción en verde (Estilo de nuestro Grupo 158)
     axes[1].imshow(slice_img, cmap="gray")
     masked_pred = np.ma.masked_where(slice_pred == 0, slice_pred)
-    axes[1].imshow(masked_pred, cmap="Greens", alpha=0.7, vmin=0, vmax=1)
+    axes[1].imshow(masked_pred, cmap="Reds", alpha=0.7, vmin=0, vmax=1)
     axes[1].set_title("Predicción (Mascara Completa)", fontsize=14)
     axes[1].axis("off")
 

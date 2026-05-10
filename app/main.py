@@ -6,33 +6,24 @@ import shutil
 import os
 import uuid
 
-# Importaciones del proyecto
-from app.core.inference import (
-    load_models,
-    run_inference_alzheimer,
-    run_inference_acv,
-    run_inference_metastasis,
-    create_best_slice_visualization,
-)
+from app.core.inference import load_models, run_inference_alzheimer, run_inference_acv, run_inference_metastasis, create_best_slice_visualization
 from app.core.database import save_prediction_metadata, get_paginated_history
 from app.errors.handlers import register_exception_handlers
 from app.errors.http_errors import InternalError
 from app.schemas import PredictionResponse, AlzheimerPredictionResponse, APIErrorSchema, TaskType, PaginatedHistoryResponse
 from app.core.storage import upload_file, initialize_storage
 
-# ==========================================
-# 1. VARIABLE GLOBAL: Para El SEMÁFORO
-# ==========================================
-# Esta variable controla que solo pase 1 petición a la vez.
 is_processing = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Iniciando carga de modelos AI...")
-    load_models()
-    print("Inicializando conexiones de almacenamiento...")
-    initialize_storage()
+    # Condición para evitar cargar modelos si estamos corriendo tests
+    if not os.getenv("TESTING_MODE"):
+        print("Iniciando carga de modelos AI...")
+        load_models()
+        print("Inicializando conexiones de almacenamiento...")
+        initialize_storage()
     yield
     print("Apagando servicio...")
 
@@ -49,22 +40,31 @@ app.add_middleware(
 
 
 # ==========================================
-# 2. ENDPOINT DE STATUS (Para el Frontend)
+# FUNCIONES DE VALIDACIÓN
 # ==========================================
+def validate_medical_image(file: UploadFile):
+    """Verifica que el archivo sea un volumen NIfTI válido."""
+    if not file.filename.endswith((".nii", ".nii.gz")):
+        raise HTTPException(status_code=400, detail=f"Extensión inválida en {file.filename}. Se requiere .nii o .nii.gz")
+
+
+def validate_identifiers(*args):
+    """Verifica que los IDs de paciente y médico no estén vacíos."""
+    for arg_name, arg_val in args:
+        if not arg_val or not arg_val.strip():
+            raise HTTPException(status_code=400, detail=f"El campo '{arg_name}' es obligatorio y no puede estar vacío.")
+
+
+# ==========================================
+# ENDPOINTS
+# ==========================================
+
+
 @app.get("/status")
 async def get_system_status():
-    """
-    El frontend debe consumir este endpoint cada 2 o 3 segundos.
-    Retorna el estado actual del servidor para mostrar en la UI.
-    """
     if is_processing:
-        return {"status": "busy", "color": "red", "message": "El equipo está procesando otra imagen. Por favor, aguarde."}
-    return {"status": "free", "color": "green", "message": "Sistema listo para recibir imágenes."}
-
-
-# ==========================================
-# 3. ENDPOINTS DE INFERENCIA
-# ==========================================
+        return {"status": "busy", "color": "red", "message": "El equipo está procesando."}
+    return {"status": "free", "color": "green", "message": "Sistema listo."}
 
 
 @app.post("/predict/metastasis", response_model=PredictionResponse)
@@ -80,18 +80,21 @@ async def predict_metastasis(
     if is_processing:
         raise HTTPException(status_code=503, detail="Servidor ocupado")
 
+    # VALIDACIONES
+    validate_identifiers(("doctor_id", doctor_id), ("paciente_id", paciente_id))
+    files_map = {"t1_pre": t1_pre, "t1_gd": t1_gd, "flair": flair, "bravo": bravo}
+    for file_obj in files_map.values():
+        validate_medical_image(file_obj)
+
     study_id = str(uuid.uuid4())
     temp_dir = f"/tmp/{study_id}"
     os.makedirs(temp_dir, exist_ok=True)
-
     saved_paths = {}
     input_urls = {}
 
     try:
         is_processing = True
 
-        # 1. Guardar localmente para procesamiento
-        files_map = {"t1_pre": t1_pre, "t1_gd": t1_gd, "flair": flair, "bravo": bravo}
         for key, file_obj in files_map.items():
             file_path = os.path.join(temp_dir, f"{key}.nii.gz")
             with open(file_path, "wb") as buffer:
@@ -99,18 +102,12 @@ async def predict_metastasis(
             saved_paths[key] = file_path
 
         output_local = os.path.join(temp_dir, "prediction.nii.gz")
-
-        # 2. Inferencia
         await run_in_threadpool(run_inference_metastasis, saved_paths, output_local, TaskType.metastasis)
 
-        # Generar JPG del mejor corte. Elegimos t1_gd o bravo como representativo estructural
         rep_img_path = saved_paths.get("t1_gd", saved_paths.get("bravo", saved_paths["t1_pre"]))
         jpg_local = os.path.join(temp_dir, "visualization.jpg")
-        await run_in_threadpool(
-            create_best_slice_visualization, rep_img_path, output_local, paciente_id, jpg_local, TaskType.metastasis
-        )
+        await run_in_threadpool(create_best_slice_visualization, rep_img_path, output_local, paciente_id, jpg_local, TaskType.metastasis)
 
-        # Subida a MinIO
         for key, local_path in saved_paths.items():
             s3_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/{key}.nii.gz"
             input_urls[key] = upload_file(local_path, s3_path)
@@ -118,7 +115,6 @@ async def predict_metastasis(
         s3_prediction_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/prediction.nii.gz"
         prediction_url = upload_file(output_local, s3_prediction_path)
 
-        # Subir JPG a MinIO
         s3_jpg_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/visualization.jpg"
         visualization_url = upload_file(jpg_local, s3_jpg_path)
 
@@ -128,7 +124,7 @@ async def predict_metastasis(
             task_type=TaskType.metastasis.value,
             input_images=input_urls,
             prediction_url=prediction_url,
-            visualization_url=visualization_url,  # Se pasa a la BD
+            visualization_url=visualization_url,
         )
 
         return PredictionResponse(
@@ -142,7 +138,6 @@ async def predict_metastasis(
             task=TaskType.metastasis.value,
             modalities_used=list(saved_paths.keys()),
         )
-
     except Exception as e:
         raise InternalError(detail=str(e))
     finally:
@@ -155,6 +150,10 @@ async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), 
     global is_processing
     if is_processing:
         raise HTTPException(status_code=503, detail="Servidor ocupado")
+
+    # VALIDACIONES
+    validate_identifiers(("doctor_id", doctor_id), ("paciente_id", paciente_id))
+    validate_medical_image(file_t1)
 
     study_id = str(uuid.uuid4())
     temp_dir = f"/tmp/{study_id}"
@@ -169,13 +168,9 @@ async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), 
         output_local = os.path.join(temp_dir, "prediction.nii.gz")
         await run_in_threadpool(run_inference_acv, {"t1": local_t1}, output_local, TaskType.acv)
 
-        # Generar JPG
         jpg_local = os.path.join(temp_dir, "visualization.jpg")
-        await run_in_threadpool(
-            create_best_slice_visualization, local_t1, output_local, paciente_id, jpg_local, TaskType.acv
-        )
+        await run_in_threadpool(create_best_slice_visualization, local_t1, output_local, paciente_id, jpg_local, TaskType.acv)
 
-        # Subida a MinIO
         s3_t1_path = f"{paciente_id}/{TaskType.acv.value}/{study_id}/file_t1.nii.gz"
         s3_pred_path = f"{paciente_id}/{TaskType.acv.value}/{study_id}/prediction.nii.gz"
         s3_jpg_path = f"{paciente_id}/{TaskType.acv.value}/{study_id}/visualization.jpg"
@@ -204,7 +199,6 @@ async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), 
             task=TaskType.acv.value,
             modalities_used=["t1"],
         )
-
     except Exception as e:
         raise InternalError(detail=str(e))
     finally:
@@ -212,15 +206,14 @@ async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), 
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-@app.post(
-    "/predict/alzheimer",
-    response_model=AlzheimerPredictionResponse,
-    responses={400: {"model": APIErrorSchema}, 500: {"model": APIErrorSchema}, 503: {"description": "Servidor Ocupado"}},
-)
+@app.post("/predict/alzheimer", response_model=AlzheimerPredictionResponse)
 async def predict_alzheimer(doctor_id: str = Form(...), file_t1: UploadFile = File(...)):
     global is_processing
     if is_processing:
-        raise HTTPException(status_code=503, detail="El servidor está procesando otra petición.")
+        raise HTTPException(status_code=503, detail="Servidor ocupado")
+
+    validate_identifiers(("doctor_id", doctor_id))
+    validate_medical_image(file_t1)
 
     job_id = str(uuid.uuid4())
     temp_dir = f"/tmp/{job_id}"
@@ -253,9 +246,6 @@ async def predict_alzheimer(doctor_id: str = Form(...), file_t1: UploadFile = Fi
             modalities_used=list(saved_paths.keys()),
         )
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
         raise InternalError(detail=str(e))
     finally:
         is_processing = False

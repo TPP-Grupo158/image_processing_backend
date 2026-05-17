@@ -71,24 +71,47 @@ def load_models():
 
 
 def robust_normalization(img_data):
-    mask = img_data > 0
+    """
+    Normalización robusta (recorte de percentiles y z-score)
+    preservando el fondo de la imagen médica en 0.
+    """
+    out = np.copy(img_data)
+    mask = out > 0
+
     if np.sum(mask) == 0:
-        return img_data
-    p01 = np.percentile(img_data[mask], 1)
-    p99 = np.percentile(img_data[mask], 99)
-    img_data = np.clip(img_data, p01, p99)
-    mean = np.mean(img_data[mask])
-    std = np.std(img_data[mask])
-    return (img_data - mean) / (std + 1e-8)
+        return out
+
+    # Extraemos solo el tejido cerebral para calcular umbrales
+    p01 = np.percentile(out[mask], 1)
+    p99 = np.percentile(out[mask], 99)
+
+    # Recortamos outliers solo en la región de interés
+    out[mask] = np.clip(out[mask], p01, p99)
+
+    # Calculamos estadísticas y normalizamos solo el tejido
+    mean = np.mean(out[mask])
+    std = np.std(out[mask])
+    out[mask] = (out[mask] - mean) / (std + 1e-8)
+
+    return out
 
 
 def z_score_normalization(img_data):
-    mask = img_data > 0
+    """
+    Normalización estándar preservando el fondo en 0.
+    """
+    out = np.copy(img_data)
+    mask = out > 0
+
     if np.sum(mask) == 0:
-        return img_data
-    mean = np.mean(img_data[mask])
-    std = np.std(img_data[mask])
-    return (img_data - mean) / (std + 1e-8)
+        return out
+
+    # Calculamos estadísticas y normalizamos solo el tejido
+    mean = np.mean(out[mask])
+    std = np.std(out[mask])
+    out[mask] = (out[mask] - mean) / (std + 1e-8)
+
+    return out
 
 
 def preprocess_alzheimer(image_path):

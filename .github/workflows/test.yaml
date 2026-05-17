@@ -1,0 +1,49 @@
+name: Unit Tests & Coverage
+
+on:
+  push:
+    branches:
+      - "**" # Se ejecuta en todas las ramas
+  pull_request:
+    branches:
+      - "main" # Protege la rama principal
+  workflow_dispatch: # Permite ejecutarlo manualmente desde la web
+
+jobs:
+  test:
+    name: Run Pytest with Docker Compose
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write # Permiso necesario para que el bot pueda comentar en el PR
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Ejecutar suite de pruebas
+        run: |
+          docker compose -f docker-compose.test.yml up --build \
+            --abort-on-container-exit \
+            --exit-code-from test_runner
+
+      - name: Extraer reporte de coverage
+        if: always()
+        run: |
+          docker cp fast_api_tester:/code/coverage.xml ./coverage.xml || true
+
+      # --- NUEVO PASO: Bot de comentarios en Pull Requests ---
+      - name: Pytest Coverage Commentator
+        uses: MishaKav/pytest-coverage-comment@main
+        if: always() && github.event_name == 'pull_request'
+        with:
+          pytest-xml-coverage-path: ./coverage.xml
+          title: "📊 Reporte de Cobertura de Tests (Grupo 158)"
+          badge-title: Coverage
+          hide-badge: false
+          hide-report: false
+          create-new-comment: false # Actualiza el mismo comentario si se suben más commits
+          hide-comment: false
+          report-only-changed-files: true # Solo muestra el coverage de los archivos que se modificaron en ese PR

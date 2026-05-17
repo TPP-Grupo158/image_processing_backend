@@ -4,10 +4,9 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: fast_api_tester
-    # CAMBIO AQUÍ: Usamos 'python -m pytest' y seteamos PYTHONPATH por seguridad
     command: >
       bash -c "pip install -r requirements-test.txt && 
-               PYTHONPATH=/code python -m pytest app/tests/ -v --cov=app --cov-report=term-missing"
+               PYTHONPATH=/code python -m pytest app/tests/ -v --cov=app --cov-report=term-missing --cov-report=xml"
     environment:
       - MONGO_URI=mongodb://fake-uri:27017
       - MINIO_ACCESS_KEY=fakekey

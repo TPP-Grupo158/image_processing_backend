@@ -4,12 +4,15 @@ from unittest.mock import patch
 
 
 def get_dummy_file(filename="test.nii.gz"):
-    """Crea un archivo binario en memoria simulando un NIfTI."""
+    """
+    Fixture auxiliar: Crea un archivo binario en RAM.
+    Evita tener que guardar archivos .nii.gz reales y pesados en el repositorio de GitHub.
+    """
     return (filename, io.BytesIO(b"dummy_data"), "application/gzip")
 
 
 def get_bad_file():
-    """Crea un archivo con extensión inválida."""
+    """Simula una foto subida por error para probar la validación de extensiones."""
     return ("test.jpg", io.BytesIO(b"image_data"), "image/jpeg")
 
 
@@ -20,6 +23,7 @@ def test_system_status_free(client):
 
 
 def test_system_status_busy(client):
+    """Verifica que el endpoint refleje el estado cuando la variable global cambia."""
     import app.main
 
     app.main.is_processing = True
@@ -32,6 +36,7 @@ def test_system_status_busy(client):
 
 
 def test_predict_busy(client):
+    """Asegura que el servidor rechace peticiones con 503 si el modelo ya está inferiendo."""
     import app.main
 
     app.main.is_processing = True
@@ -46,6 +51,7 @@ def test_predict_busy(client):
 
 
 def test_predict_acv_success(client, mock_mongo):
+    """Test de integración del flujo exitoso. Comprueba guardado en base de datos mockeada."""
     files = {"file_t1": get_dummy_file("paciente_t1.nii.gz")}
     data = {"doctor_id": "DrSmith", "paciente_id": "Paciente123"}
     response = client.post("/predict/acv", data=data, files=files)
@@ -59,6 +65,7 @@ def test_predict_acv_success(client, mock_mongo):
 
 
 def test_predict_acv_invalid_extension(client):
+    """Comprueba el Fail-Fast de validación médica (HTTP 400)."""
     files = {"file_t1": get_bad_file()}
     data = {"doctor_id": "DrSmith", "paciente_id": "Paciente123"}
     response = client.post("/predict/acv", data=data, files=files)
@@ -77,7 +84,10 @@ def test_predict_acv_missing_fields(client):
 
 
 def test_predict_acv_internal_error(client):
-    """Simula un fallo para probar el manejador de errores 500."""
+    """
+    Test de gestión de errores: Forzamos un fallo inyectando una excepción en el motor del modelo
+    para garantizar que el sistema no se caiga y devuelva un HTTP 500 controlado.
+    """
     files = {"file_t1": get_dummy_file()}
     data = {"doctor_id": "DrSmith", "paciente_id": "Paciente123"}
 
@@ -89,7 +99,7 @@ def test_predict_acv_internal_error(client):
 
 
 def test_predict_metastasis_success(client):
-    # Se prueban las 4 modalidades requeridas para metástasis
+    """Comprueba el flujo de entrada multi-modal (4 secuencias obligatorias)."""
     files = {
         "t1_pre": get_dummy_file("t1.nii.gz"),
         "t1_gd": get_dummy_file("t1gd.nii.gz"),
@@ -116,8 +126,8 @@ def test_predict_alzheimer_success(client):
 
 
 def test_history_endpoints(client, mock_mongo):
+    # Generamos un timestamp falso único para todo el batch de prueba
     fake_time = datetime.utcnow()
-    # Insertamos registros utilizando el modelo aplanado para probar el des-aplanado en database.py
     mock_mongo.insert_many(
         [
             {
@@ -141,13 +151,15 @@ def test_history_endpoints(client, mock_mongo):
         ]
     )
 
-    # Historial de Paciente
     res_pac = client.get("/history/patient/Pac1")
     assert res_pac.status_code == 200
     assert res_pac.json()["meta"]["total_records"] == 2
-    assert "t1" in res_pac.json()["data"][0]["original_images"]
 
-    # Historial de Doctor
+    # FIX ANTI-FLAKY: Como los 3 documentos se insertaron en el microsegundo exacto, MongoDB
+    # no garantiza el orden al consultar. Usar any() asegura que busquemos la imagen 't1'
+    # dinámicamente sin importar si el array llegó desordenado, previniendo fallos.
+    assert any("t1" in record.get("original_images", {}) for record in res_pac.json()["data"])
+
     res_doc = client.get("/history/doctor/DrA")
     assert res_doc.status_code == 200
     assert res_doc.json()["meta"]["total_records"] == 2

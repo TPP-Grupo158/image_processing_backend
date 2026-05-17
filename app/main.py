@@ -13,13 +13,22 @@ from app.errors.http_errors import InternalError
 from app.schemas import PredictionResponse, AlzheimerPredictionResponse, TaskType, PaginatedHistoryResponse
 from app.core.storage import upload_file, initialize_storage
 
+# Semáforo global simple para evitar que la GPU o la RAM colapsen
+# procesando múltiples volúmenes 3D en simultáneo.
 is_processing = False
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Condición para evitar cargar modelos si estamos corriendo tests
-    if not os.getenv("TESTING_MODE"):
+    """
+    Ciclo de vida de FastAPI. Se ejecuta una vez al levantar el servidor.
+    Aquí pre-cargamos los modelos pesados de IA en la VRAM/RAM y verificamos MinIO.
+    """
+    # Parseo de variables de entorno. Evita el error donde "False" o "0"
+    # se evalúan como True por ser strings con contenido (Truthy).
+    testing_mode = os.getenv("TESTING_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+    if not testing_mode:
         print("Iniciando carga de modelos AI...")
         load_models()
         print("Inicializando conexiones de almacenamiento...")
@@ -31,6 +40,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Medical AI API", lifespan=lifespan)
 register_exception_handlers(app)
 
+# Configuración CORS para permitir peticiones desde cualquier frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,29 +49,22 @@ app.add_middleware(
 )
 
 
-# ==========================================
-# FUNCIONES DE VALIDACIÓN
-# ==========================================
 def validate_medical_image(file: UploadFile):
-    """Verifica que el archivo sea un volumen NIfTI válido."""
+    """Verifica que el archivo subido sea un volumen NIfTI válido."""
     if not file.filename.endswith((".nii", ".nii.gz")):
         raise HTTPException(status_code=400, detail=f"Extensión inválida en {file.filename}. Se requiere .nii o .nii.gz")
 
 
 def validate_identifiers(*args):
-    """Verifica que los IDs de paciente y médico no estén vacíos."""
+    """Valida que los metadatos de negocio (IDs) no estén vacíos."""
     for arg_name, arg_val in args:
         if not arg_val or not arg_val.strip():
             raise HTTPException(status_code=400, detail=f"El campo '{arg_name}' es obligatorio y no puede estar vacío.")
 
 
-# ==========================================
-# ENDPOINTS
-# ==========================================
-
-
 @app.get("/status")
 async def get_system_status():
+    """Endpoint de monitoreo (Healthcheck) para saber si la IA está ocupada."""
     if is_processing:
         return {"status": "busy", "color": "red", "message": "El equipo está procesando."}
     return {"status": "free", "color": "green", "message": "Sistema listo."}
@@ -80,12 +83,13 @@ async def predict_metastasis(
     if is_processing:
         raise HTTPException(status_code=503, detail="Servidor ocupado")
 
-    # VALIDACIONES
+    # 1. Validaciones tempranas (Fail Fast)
     validate_identifiers(("doctor_id", doctor_id), ("paciente_id", paciente_id))
     files_map = {"t1_pre": t1_pre, "t1_gd": t1_gd, "flair": flair, "bravo": bravo}
     for file_obj in files_map.values():
         validate_medical_image(file_obj)
 
+    # 2. Creación de un espacio de trabajo temporal aislado para esta petición
     study_id = str(uuid.uuid4())
     temp_dir = f"/tmp/{study_id}"
     os.makedirs(temp_dir, exist_ok=True)
@@ -95,6 +99,7 @@ async def predict_metastasis(
     try:
         is_processing = True
 
+        # 3. Guardado local de los volúmenes en disco para no saturar la RAM
         for key, file_obj in files_map.items():
             file_path = os.path.join(temp_dir, f"{key}.nii.gz")
             with open(file_path, "wb") as buffer:
@@ -102,12 +107,17 @@ async def predict_metastasis(
             saved_paths[key] = file_path
 
         output_local = os.path.join(temp_dir, "prediction.nii.gz")
+
+        # 4. Inferencia AI: Se usa run_in_threadpool porque PyTorch es bloqueante (síncrono).
+        # Esto evita que FastAPI se congele y pueda seguir respondiendo a otros endpoints (ej: /status)
         await run_in_threadpool(run_inference_metastasis, saved_paths, output_local, TaskType.metastasis)
 
+        # 5. Generación de la imagen JPG para el Frontend
         rep_img_path = saved_paths.get("t1_gd", saved_paths.get("bravo", saved_paths["t1_pre"]))
         jpg_local = os.path.join(temp_dir, "visualization.jpg")
         await run_in_threadpool(create_best_slice_visualization, rep_img_path, output_local, paciente_id, jpg_local, TaskType.metastasis)
 
+        # 6. Subida de artefactos a MinIO (S3)
         for key, local_path in saved_paths.items():
             s3_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/{key}.nii.gz"
             input_urls[key] = upload_file(local_path, s3_path)
@@ -118,6 +128,7 @@ async def predict_metastasis(
         s3_jpg_path = f"{paciente_id}/{TaskType.metastasis.value}/{study_id}/visualization.jpg"
         visualization_url = upload_file(jpg_local, s3_jpg_path)
 
+        # 7. Registro en MongoDB
         db_id = save_prediction_metadata(
             doctor_id=doctor_id,
             paciente_id=paciente_id,
@@ -141,17 +152,19 @@ async def predict_metastasis(
     except Exception as e:
         raise InternalError(detail=str(e))
     finally:
+        # GARANTÍA DE LIMPIEZA: Siempre se borran los archivos temporales
+        # sin importar si la inferencia falló o tuvo éxito. Evita llenar el disco.
         is_processing = False
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+# ... (El endpoint de ACV sigue exactamente la misma arquitectura de metástasis)
 @app.post("/predict/acv", response_model=PredictionResponse)
 async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), file_t1: UploadFile = File(...)):
     global is_processing
     if is_processing:
         raise HTTPException(status_code=503, detail="Servidor ocupado")
 
-    # VALIDACIONES
     validate_identifiers(("doctor_id", doctor_id), ("paciente_id", paciente_id))
     validate_medical_image(file_t1)
 
@@ -226,6 +239,7 @@ async def predict_alzheimer(doctor_id: str = Form(...), file_t1: UploadFile = Fi
             shutil.copyfileobj(file_t1.file, buffer)
 
         saved_paths = {"t1": file_path}
+        # Alzheimer usa clasificación binaria (DenseNet121), no devuelve imagen, solo JSON.
         result = await run_in_threadpool(run_inference_alzheimer, saved_paths)
 
         s3_path_in = f"{doctor_id}/alzheimer/{job_id}/input_t1.nii.gz"

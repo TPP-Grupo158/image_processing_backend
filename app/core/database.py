@@ -9,20 +9,15 @@ client = MongoClient(settings.MONGO_URI)
 db = client[settings.DB_NAME]
 collection = db["predictions"]
 
-# ==========================================
-# CREACIÓN DE ÍNDICES EN MONGO:
-# ==========================================
-# Al crear índices, las búsquedas por paciente o médico van pasar de
-# complejidad O(N) a O(log N), optimizando la base de datos drásticamente.
-
-# CONTROL DE ENTORNO DE TESTING:
-# PyMongo tiene inicialización Lazy , pero métodos como
-# create_index fuerzan una conexión inmediata a la base de datos.
-# Durante la ejecución de la suite de pruebas (Pytest), este archivo es importado ANTES
+# --- PROTECCIÓN DEL ENTORNO DE TESTING ---
+# Parseo booleano explícito. Evita que el string "False" detenga los tests.
+# Durante la ejecución de la suite de pruebas, este archivo es importado ANTES
 # de que las fixtures de simulación (mongomock) estén completamente montadas.
-# Si no verificamos la variable TESTING_MODE, el contenedor de pruebas colapsará por timeout
-# intentando resolver la URI ficticia de la base de datos.
-if not os.getenv("TESTING_MODE"):
+# Al omitir la creación de índices, evitamos que el test_runner colapse por timeout.
+testing_mode = os.getenv("TESTING_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+if not testing_mode:
+    # Optimización O(log N): Acelera las búsquedas en historiales
     collection.create_index("paciente_id")
     collection.create_index("doctor_id")
     collection.create_index([("created_at", -1)])
@@ -34,21 +29,24 @@ def save_prediction_metadata(
     task_type: str,
     input_images: Dict[str, str],
     prediction_url: Optional[str],
-    visualization_url: Optional[str] = None,  # Recibe la URL de MinIO del JPG
+    visualization_url: Optional[str] = None,
     status: str = "completed",
 ):
-    """Registra el evento de predicción en MongoDB Atlas."""
+    """
+    Registra el evento de predicción en MongoDB Atlas.
+    Se aplana dinámicamente el diccionario de 'input_images' para facilitar consultas indexadas.
+    """
     record = {
         "doctor_id": doctor_id,
         "paciente_id": paciente_id,
         "task_type": task_type,
         "created_at": datetime.utcnow(),
         "prediction_image": prediction_url,
-        "visualization_image": visualization_url,  # Se guarda en Mongo Atlas
+        "visualization_image": visualization_url,
         "status": status,
     }
 
-    # Inyectamos dinámicamente las URLs de entrada
+    # Inyectamos dinámicamente las URLs de entrada ("original_image_t1", "original_image_flair", etc.)
     for modality, url in input_images.items():
         record[f"original_image_{modality}"] = url
 
@@ -58,45 +56,38 @@ def save_prediction_metadata(
 
 def get_paginated_history(filter_query: Dict[str, Any], page: int = 1, limit: int = 10) -> Dict[str, Any]:
     """
-    Recupera el historial paginado basado en un filtro dinámico.
-    Devuelve los documentos procesados y los metadatos de paginación.
+    Recupera el historial paginado.
+    Aplica lógica inversa para reconstruir el diccionario de imágenes originales.
     """
-    # 1. Calculamos el desplazamiento (Offset)
+    # 1. Calculamos el desplazamiento (Offset) para la paginación
     skip = (page - 1) * limit
-
-    # 2. Obtenemos el conteo total de documentos que coinciden con el filtro
     total_records = collection.count_documents(filter_query)
     total_pages = math.ceil(total_records / limit) if limit > 0 else 1
 
-    # 3. Ejecutamos la consulta con ordenamiento y paginación
-    # Ordenamos por 'created_at' de forma descendente (-1) para ver lo más nuevo primero
+    # 2. Búsqueda con ordenamiento por fecha (más nuevos primero)
     cursor = collection.find(filter_query).sort("created_at", -1).skip(skip).limit(limit)
 
     records = []
     for doc in cursor:
-        # Transformamos el _id de ObjectId de Mongo a string estándar
+        # Casteo de ObjectId de Mongo a String para compatibilidad con JSON/Pydantic
         doc_id = str(doc.pop("_id"))
-
-        # Reconstruimos el diccionario de imágenes originales que guardamos de forma aplanada
         original_images = {}
         keys_to_remove = []
 
+        # 3. Des-Aplanamiento: Agrupamos de nuevo las modalidades en un diccionario
         for key, value in doc.items():
             if key.startswith("original_image_"):
                 modality = key.replace("original_image_", "")
                 original_images[modality] = value
                 keys_to_remove.append(key)
 
-        # Limpiamos las llaves aplanadas del documento original
         for key in keys_to_remove:
             doc.pop(key)
 
-        # Ensamblamos el registro final
         doc["id"] = doc_id
         doc["original_images"] = original_images
         records.append(doc)
 
-    # 4. Ensamblamos la respuesta completa
     return {
         "data": records,
         "meta": {

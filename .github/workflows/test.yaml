@@ -13,6 +13,9 @@ jobs:
   test:
     name: Run Pytest with Docker Compose
     runs-on: ubuntu-latest
+    # GESTIÓN ESTRICTA DE PERMISOS:
+    # Restablece "contents: read" para evitar el error 'exit code 128' (Repository Not Found),
+    # y nos da permiso de escritura para que el bot pueda comentar el PR.
     permissions:
       contents: read
       pull-requests: write
@@ -23,14 +26,15 @@ jobs:
         uses: actions/checkout@v4
 
       # 
-      # LIBERAMOS ESPACIO EN EL RUNNER
+      # OPTIMIZACIÓN DE ESPACIO DE DISCO
       # 
-      # Borra frameworks innecesarios (Android, .NET, Haskell) 
-      # de la máquina de GitHub para hacerle lugar a PyTorch y CUDA.
+      # PyTorch + CUDA pesan casi 5GB al desempaquetar. Los runners gratuitos de GitHub colapsan
+      # por falta de espacio (ENOSPC). Esta Action borra Android/Haskell/.NET de la máquina 
+      # virtual, liberando >30GB antes de armar nuestra imagen de Docker.
+      # FIX SUPPLY-CHAIN: Se clava la versión a @v1.3.1 en lugar de @main por seguridad.
       - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@v1.3.1
         with:
-          # Mantenemos las herramientas base pero borramos los SDKs pesados
           tool-cache: false
           android: true
           dotnet: true
@@ -43,6 +47,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Ejecutar suite de pruebas
+        # Las flags aseguran que el pipeline falle y se marque rojo si pytest retorna error.
         run: |
           docker compose -f docker-compose.test.yml up --build \
             --abort-on-container-exit \
@@ -50,11 +55,17 @@ jobs:
 
       - name: Extraer reporte de coverage
         if: always()
+        # FIX DE ARQUITECTURA: Como eliminamos el "container_name" estático, usamos "docker compose cp" 
+        # referenciando el nombre lógico del servicio (test_runner) para extraer el archivo XML.
         run: |
-          docker cp fast_api_tester:/code/coverage.xml ./coverage.xml || true
+          docker compose -f docker-compose.test.yml cp test_runner:/code/coverage.xml ./coverage.xml || true
 
+      # 
+      # INTEGRACIÓN CONTINUA: REPORTE EN PR
+      # 
+      # FIX SUPPLY-CHAIN: Se clava a la versión oficial v1.1.51 en lugar de @main.
       - name: Pytest Coverage Commentator
-        uses: MishaKav/pytest-coverage-comment@main
+        uses: MishaKav/pytest-coverage-comment@v1.1.51
         if: always() && github.event_name == 'pull_request'
         with:
           pytest-xml-coverage-path: ./coverage.xml

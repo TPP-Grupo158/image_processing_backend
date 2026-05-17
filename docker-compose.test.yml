@@ -1,16 +1,26 @@
+version: '3.8'
+
+# 
+# ENTORNO DE TESTING
+# 
 services:
   test_runner:
     build: 
       context: .
       dockerfile: Dockerfile
-    container_name: fast_api_tester
+    # FIX DE ARQUITECTURA: Se removió "container_name: fast_api_tester".
+    # Al no forzar un nombre absoluto, permitimos que GitHub Actions (o ejecuciones locales en paralelo)
+    # autogeneren nombres únicos (ej: image_processing_backend-test_runner-1). 
+    # Esto elimina conflictos de concurrencia en servidores compartidos.
     command: >
       bash -c "pip install -r requirements-test.txt && 
                PYTHONPATH=/code python -m pytest app/tests/ -v --cov=app --cov-report=term-missing --cov-report=xml"
     environment:
+      # Credenciales fake asegurando aislamiento total de producción
       - MONGO_URI=mongodb://fake-uri:27017
       - MINIO_ACCESS_KEY=fakekey
       - MINIO_SECRET_KEY=fakesecret
       - TESTING_MODE=True
     volumes:
+      # Sincronización en vivo del código local con el contenedor
       - .:/code

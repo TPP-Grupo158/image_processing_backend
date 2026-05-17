@@ -1,49 +1,76 @@
 name: Unit Tests & Coverage
 
+# 
+# 1. EVENTOS QUE DISPARAN EL WORKFLOW
+# 
 on:
   push:
     branches:
-      - "**" # Se ejecuta en todas las ramas
+      - "**" # Ejecuta el pipeline en CUALQUIER rama cada vez que se hace un 'git push'.
   pull_request:
     branches:
-      - "main" # Protege la rama principal
-  workflow_dispatch: # Permite ejecutarlo manualmente desde la web
+      - "main" # Ejecuta el pipeline cuando se abre o actualiza un PR hacia la rama 'main'.
+  workflow_dispatch: # Habilita un botón en la interfaz de GitHub para correr el test manualmente.
 
+# 
+# 2. DEFINICIÓN DE LOS TRABAJOS (JOBS)
+# 
 jobs:
   test:
     name: Run Pytest with Docker Compose
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # Levanta una máquina virtual efímera con la última versión de Ubuntu.
+    
+    # 
+    # 3. GESTIÓN ESTRICTA DE PERMISOS (EL FIX DEL ERROR 128)
+    # 
+    # En GitHub Actions, si declaras el bloque 'permissions', TODOS los demás permisos 
+    # no declarados se revocan automáticamente por seguridad (pasan a 'none').
     permissions:
-      pull-requests: write # Permiso necesario para que el bot pueda comentar en el PR
+      contents: read       # CRÍTICO: Restaura el permiso para que 'actions/checkout' pueda descargar (leer) el código fuente.
+      pull-requests: write # Permite al bot interactuar y escribir comentarios en el Pull Request.
+      statuses: write      # Permite actualizar los checks de estado (la tilde verde o la cruz roja) en el PR.
 
+    # 
+    # 4. PASOS DE EJECUCIÓN (STEPS)
+    # 
     steps:
       - name: Checkout del código
         uses: actions/checkout@v4
+        # Descarga el código del repositorio dentro de la máquina virtual de Ubuntu.
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        # Instala Buildx, el motor moderno de Docker que maneja caché y builds multiplataforma de forma más eficiente.
 
       - name: Ejecutar suite de pruebas
         run: |
           docker compose -f docker-compose.test.yml up --build \
             --abort-on-container-exit \
             --exit-code-from test_runner
+        # Explicación de las flags:
+        # --build: Fuerza a reconstruir la imagen del test_runner si hubo cambios en los requirements.
+        # --abort-on-container-exit: Apaga la red de contenedores en cuanto el test_runner termina su trabajo.
+        # --exit-code-from: Si pytest falla (ej. coverage < 70%), el test_runner devuelve error (exit code 1). 
+        #                   Esta flag traslada ese error al pipeline para que GitHub marque el paso en rojo.
 
       - name: Extraer reporte de coverage
         if: always()
         run: |
           docker cp fast_api_tester:/code/coverage.xml ./coverage.xml || true
+        # if: always() asegura que este paso se ejecute INCLUSO si los tests fallaron en el paso anterior.
+        # docker cp: Copia el archivo coverage.xml desde el contenedor aislado hacia el sistema de archivos local de Ubuntu.
+        # || true: Previene que el pipeline falle catastróficamente si por algún motivo extremo el archivo XML no se generó.
 
-      # --- NUEVO PASO: Bot de comentarios en Pull Requests ---
       - name: Pytest Coverage Commentator
         uses: MishaKav/pytest-coverage-comment@main
         if: always() && github.event_name == 'pull_request'
+        # Solo se ejecuta si el pipeline se disparó a causa de un Pull Request.
         with:
           pytest-xml-coverage-path: ./coverage.xml
           title: "📊 Reporte de Cobertura de Tests (Grupo 158)"
           badge-title: Coverage
           hide-badge: false
           hide-report: false
-          create-new-comment: false # Actualiza el mismo comentario si se suben más commits
+          create-new-comment: false # Si haces otro push al PR, edita el comentario existente en lugar de hacer spam.
           hide-comment: false
-          report-only-changed-files: true # Solo muestra el coverage de los archivos que se modificaron en ese PR
+          report-only-changed-files: true # Optimiza la lectura mostrando solo el coverage de los archivos que modificaste en el PR actual.

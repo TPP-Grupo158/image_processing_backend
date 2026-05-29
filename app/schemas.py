@@ -22,19 +22,6 @@ class PredictionResponse(BaseModel):
     modalities_used: List[str]
 
 
-class AlzheimerPredictionResponse(BaseModel):
-    status: str
-    db_id: str
-    paciente_id: str
-    doctor_id: str
-    original_image: HttpUrl
-    task: str
-    prediction: int
-    probability: float
-    threshold: float
-    modalities_used: List[str]
-
-
 class TaskType(str, Enum):
     metastasis = "metastasis"
     acv = "acv"

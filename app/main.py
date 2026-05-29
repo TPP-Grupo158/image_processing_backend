@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import shutil
 import os
 import uuid
+import json
 
 # Importaciones del proyecto
 from app.core.inference import (
@@ -17,7 +18,7 @@ from app.core.inference import (
 from app.core.database import save_prediction_metadata, get_paginated_history
 from app.errors.handlers import register_exception_handlers
 from app.errors.http_errors import InternalError
-from app.schemas import PredictionResponse, AlzheimerPredictionResponse, APIErrorSchema, TaskType, PaginatedHistoryResponse
+from app.schemas import PredictionResponse, APIErrorSchema, TaskType, PaginatedHistoryResponse
 from app.core.storage import upload_file, initialize_storage
 
 # ==========================================
@@ -214,10 +215,10 @@ async def predict_acv(doctor_id: str = Form(...), paciente_id: str = Form(...), 
 
 @app.post(
     "/predict/alzheimer",
-    response_model=AlzheimerPredictionResponse,
+    response_model=PredictionResponse,
     responses={400: {"model": APIErrorSchema}, 500: {"model": APIErrorSchema}, 503: {"description": "Servidor Ocupado"}},
 )
-async def predict_alzheimer(doctor_id: str = Form(...), file_t1: UploadFile = File(...)):
+async def predict_alzheimer(doctor_id: str = Form(...), paciente_id: str = Form(...), file_t1: UploadFile = File(...)):
     global is_processing
     if is_processing:
         raise HTTPException(status_code=503, detail="El servidor está procesando otra petición.")
@@ -228,30 +229,40 @@ async def predict_alzheimer(doctor_id: str = Form(...), file_t1: UploadFile = Fi
 
     try:
         is_processing = True
+        # Guardar archivo T1
         file_path = f"{temp_dir}/t1.nii.gz"
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file_t1.file, buffer)
-
+        
         saved_paths = {"t1": file_path}
         result = await run_in_threadpool(run_inference_alzheimer, saved_paths)
 
-        s3_path_in = f"{doctor_id}/alzheimer/{job_id}/input_t1.nii.gz"
+        # Subir solo la imagen original
+        s3_path_in = f"{doctor_id}/{TaskType.alzheimer.value}/{job_id}/input_t1.nii.gz"
         url_in = upload_file(saved_paths["t1"], s3_path_in)
-
-        db_id = save_prediction_metadata(doctor_id, "paciente_anonimo", TaskType.alzheimer.value, {"t1": url_in}, None)
-
-        return AlzheimerPredictionResponse(
+        
+        # Guardar JSON en archivo temporal y subirlo a MinIO
+        json_path = f"{temp_dir}/result.json"
+        with open(json_path, "w") as file:
+            json.dump(result, file, indent=2)
+        
+        s3_json_path = f"{doctor_id}/{TaskType.alzheimer.value}/{job_id}/result.json"
+        url_json = upload_file(json_path, s3_json_path)
+        
+        # Guardar metadata
+        db_id = save_prediction_metadata(doctor_id, paciente_id, TaskType.alzheimer.value, {"t1": url_in}, url_json)
+        
+        return PredictionResponse(
             status="success",
             db_id=db_id,
-            paciente_id="paciente_anonimo",
+            paciente_id=paciente_id,
             doctor_id=doctor_id,
-            original_image=url_in,
+            original_images={"t1": url_in},
+            prediction_image=url_json,
             task=TaskType.alzheimer.value,
-            prediction=result["prediction"],
-            probability=result["probability"],
-            threshold=result["threshold"],
-            modalities_used=list(saved_paths.keys()),
+            modalities_used=list(saved_paths.keys())
         )
+
     except Exception as e:
         import traceback
 

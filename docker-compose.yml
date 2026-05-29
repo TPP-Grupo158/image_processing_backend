@@ -26,6 +26,13 @@ services:
       - MONGO_URI=${MONGO_URI}
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     depends_on:
       - minio # <--- ASEGURATE QUE ESTO COINCIDA CON EL SERVICIO DE ARRIBA
     networks:

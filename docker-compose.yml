@@ -21,7 +21,7 @@ services:
     build: .
     container_name: fast_api_medical
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       - MONGO_URI=${MONGO_URI}
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}

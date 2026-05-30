@@ -236,6 +236,7 @@ async def predict_alzheimer(doctor_id: str = Form(...), paciente_id: str = Form(
         
         saved_paths = {"t1": file_path}
         result = await run_in_threadpool(run_inference_alzheimer, saved_paths)
+        result = {"prediction": result["prediction"]==1, "probability": result["probability"]}
 
         # Subir solo la imagen original
         s3_path_in = f"{doctor_id}/{TaskType.alzheimer.value}/{job_id}/input_t1.nii.gz"

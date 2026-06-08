@@ -1,5 +1,20 @@
 version: '3.8'
 #Este archivo le dice a Docker: "Levantame un servidor MinIO y dame una carpeta para guardar los datos".
+
+x-shared-config: &backend-config
+    build: .
+    container_name: fast_api_medical
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URI=${MONGO_URI}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+    depends_on:
+      - minio
+    networks:
+      - medical_network
+
 services:
   # CAMBIO AQUÍ: De 'minio_local' a 'minio'
   minio:
@@ -17,15 +32,13 @@ services:
     networks:
       - medical_network
 
-  backend_ai:
-    build: .
-    container_name: fast_api_medical
-    ports:
-      - "8000:8000"
-    environment:
-      - MONGO_URI=${MONGO_URI}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+  backend_cpu:
+    <<: *backend-config
+    profiles:
+      - cpu
+
+  backend_nvidia:
+    <<: *backend-config
     deploy:
       resources:
         reservations:
@@ -33,10 +46,9 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    depends_on:
-      - minio # <--- ASEGURATE QUE ESTO COINCIDA CON EL SERVICIO DE ARRIBA
-    networks:
-      - medical_network
+    profiles:
+      - gpu-nvidia
+
 
 networks:
   medical_network:

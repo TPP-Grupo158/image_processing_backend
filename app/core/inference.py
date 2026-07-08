@@ -84,10 +84,12 @@ def robust_normalization(img_data):
 
 def z_score_normalization(img_data):
     mask = img_data > 0
-    if np.sum(mask) == 0: return img_data
+    if np.sum(mask) == 0:
+        return img_data
     mean = np.mean(img_data[mask])
     std = np.std(img_data[mask])
-    if std == 0: return img_data
+    if std == 0:
+        return img_data
     image_norm = img_data.copy()
     image_norm[mask] = (img_data[mask] - mean) / std
     return image_norm
